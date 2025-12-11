@@ -1,0 +1,50 @@
+{
+  "name": "polymarket-trading-bot",
+  "version": "1.0.0",
+  "description": "Automated trading bot for Polymarket that buys yes/no shares based on configurable strategies",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "dev:watch": "ts-node-dev --respawn src/index.ts",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "test:integration": "jest --testPathPattern=integration",
+    "test:real": "ts-node src/utils/__tests__/test-real-market.ts"
+  },
+  "keywords": [
+    "polymarket",
+    "trading",
+    "bot",
+    "automation",
+    "prediction-markets"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@polymarket/builder-relayer-client": "^0.0.6",
+    "@polymarket/builder-signing-sdk": "^0.0.8",
+    "@polymarket/clob-client": "^4.22.8",
+    "dotenv": "^16.0.2",
+    "ethers": "^5.8.0",
+    "node-cron": "^3.0.3",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.0.0",
+    "@types/node-cron": "^3.0.11",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.6",
+    "ts-node": "^10.9.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.0.0"
+  }
+}
