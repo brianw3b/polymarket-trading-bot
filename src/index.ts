@@ -1,11 +1,20 @@
 import { loadConfig } from "./config";
 import { createLogger } from "./utils/logger";
 import { initializeWallet, initializeClobClient } from "./utils/wallet";
-import { getMarketByToken, getMarketBySlug, getTokenPrice, getUserPositions, findTokenIdsForMarket } from "./utils/marketData";
-import { generateMarketSlug, parseMarketSlugPattern, getCurrentMarketSlug, MarketSlugPattern } from "./utils/marketSlugGenerator";
+import {
+  getMarketByToken,
+  getMarketBySlug,
+  getTokenPrice,
+  getUserPositions,
+  findTokenIdsForMarket,
+} from "./utils/marketData";
+import {
+  generateMarketSlug,
+  MarketSlugPattern,
+} from "./utils/marketSlugGenerator";
 import { getStrategy } from "./strategies";
 import { OrderExecutor } from "./execution/orderExecutor";
-import { TradingDecision, StrategyContext } from "./strategies/base";
+import { StrategyContext } from "./strategies/base";
 
 class PolymarketTradingBot {
   private config = loadConfig();
@@ -21,31 +30,51 @@ class PolymarketTradingBot {
       this.logger.info("Initializing Polymarket Trading Bot...");
       this.logger.info(`Strategy: ${this.config.tradingStrategy}`);
 
-      if (!this.config.targetTokenId && !this.config.targetMarketSlug && !this.config.marketSlugPattern) {
+      if (
+        !this.config.targetTokenId &&
+        !this.config.targetMarketSlug &&
+        !this.config.marketSlugPattern
+      ) {
         throw new Error(
           "Either TARGET_TOKEN_ID, TARGET_MARKET_SLUG, or MARKET_SLUG_PATTERN must be provided in .env file"
         );
       }
 
-      if (this.config.marketSlugPattern && (!this.config.marketSlugPattern.baseSlug || !this.config.marketSlugPattern.timePattern)) {
+      if (
+        this.config.marketSlugPattern &&
+        (!this.config.marketSlugPattern.baseSlug ||
+          !this.config.marketSlugPattern.timePattern)
+      ) {
         throw new Error(
           "MARKET_SLUG_PATTERN requires both MARKET_SLUG_PATTERN_BASE and MARKET_SLUG_PATTERN_TIME"
         );
       }
 
       if (this.config.marketSlugPattern) {
-        const timePattern = this.config.marketSlugPattern.timePattern === "static" 
-          ? "hourly" 
-          : (this.config.marketSlugPattern.timePattern === "15min" ? "15min" : 
-             this.config.marketSlugPattern.timePattern === "daily" ? "daily" : "hourly");
+        const timePattern =
+          this.config.marketSlugPattern.timePattern === "static"
+            ? "hourly"
+            : this.config.marketSlugPattern.timePattern === "15min"
+            ? "15min"
+            : this.config.marketSlugPattern.timePattern === "daily"
+            ? "daily"
+            : "hourly";
         const pattern: MarketSlugPattern = {
           baseSlug: this.config.marketSlugPattern.baseSlug,
           timePattern: timePattern as "hourly" | "daily" | "15min" | "custom",
         };
-        const currentSlug = generateMarketSlug(pattern, new Date(), this.logger);
+        const currentSlug = generateMarketSlug(
+          pattern,
+          new Date(),
+          this.logger
+        );
         this.config.targetMarketSlug = currentSlug;
-        this.logger.info(`Market Slug Pattern: ${this.config.marketSlugPattern.baseSlug}`);
-        this.logger.info(`Time Pattern: ${this.config.marketSlugPattern.timePattern}`);
+        this.logger.info(
+          `Market Slug Pattern: ${this.config.marketSlugPattern.baseSlug}`
+        );
+        this.logger.info(
+          `Time Pattern: ${this.config.marketSlugPattern.timePattern}`
+        );
         this.logger.info(`Generated Current Slug: ${currentSlug}`);
       } else if (this.config.targetMarketSlug) {
         this.logger.info(`Target Market Slug: ${this.config.targetMarketSlug}`);
@@ -53,7 +82,8 @@ class PolymarketTradingBot {
         this.logger.info(`Target Token ID: ${this.config.targetTokenId}`);
       }
 
-      const { wallet, address, safeAddress, relayClient } = await initializeWallet(this.config, this.logger);
+      const { wallet, address, safeAddress, relayClient } =
+        await initializeWallet(this.config, this.logger);
 
       this.clobClient = await initializeClobClient(
         this.config,
@@ -68,18 +98,30 @@ class PolymarketTradingBot {
       this.strategy = getStrategy(this.config.tradingStrategy);
       if (!this.strategy) {
         throw new Error(
-          `Unknown strategy: ${this.config.tradingStrategy}. Available: ${["balanced", "meanReversion", "momentum", "arbitrage"].join(", ")}`
+          `Unknown strategy: ${this.config.tradingStrategy}. Available: ${[
+            "balanced",
+            "meanReversion",
+            "momentum",
+            "arbitrage",
+          ].join(", ")}`
         );
       }
 
-      this.logger.info(`Strategy loaded: ${this.strategy.name} - ${this.strategy.description}`);
+      this.logger.info(
+        `Strategy loaded: ${this.strategy.name} - ${this.strategy.description}`
+      );
 
       let market;
       if (this.config.targetMarketSlug) {
         this.logger.info("Fetching market by slug...");
-        market = await getMarketBySlug(this.config.targetMarketSlug, this.logger);
+        market = await getMarketBySlug(
+          this.config.targetMarketSlug,
+          this.logger
+        );
         if (!market) {
-          throw new Error(`Market not found for slug: ${this.config.targetMarketSlug}`);
+          throw new Error(
+            `Market not found for slug: ${this.config.targetMarketSlug}`
+          );
         }
         if (market.tokenIds && market.tokenIds.length > 0) {
           this.config.targetTokenId = market.tokenIds[0];
@@ -88,17 +130,29 @@ class PolymarketTradingBot {
         this.logger.info("Fetching market by token ID...");
         market = await getMarketByToken(this.config.targetTokenId, this.logger);
         if (!market) {
-          this.logger.error("Market not found by token ID. This is common for markets beyond the first ~7500 results.");
-          this.logger.info("💡 Solution: Use market slug instead (more reliable)");
-          this.logger.info("   Option 1: Use MARKET_SLUG_PATTERN (for time-based markets like hourly Bitcoin)");
-          this.logger.info("     MARKET_SLUG_PATTERN_BASE=bitcoin-up-or-down-december-11-2am-et");
+          this.logger.error(
+            "Market not found by token ID. This is common for markets beyond the first ~7500 results."
+          );
+          this.logger.info(
+            "💡 Solution: Use market slug instead (more reliable)"
+          );
+          this.logger.info(
+            "   Option 1: Use MARKET_SLUG_PATTERN (for time-based markets like hourly Bitcoin)"
+          );
+          this.logger.info(
+            "     MARKET_SLUG_PATTERN_BASE=bitcoin-up-or-down-december-11-2am-et"
+          );
           this.logger.info("     MARKET_SLUG_PATTERN_TIME=hourly");
-          this.logger.info("   Option 2: Use TARGET_MARKET_SLUG (for static markets)");
+          this.logger.info(
+            "   Option 2: Use TARGET_MARKET_SLUG (for static markets)"
+          );
           this.logger.info("     TARGET_MARKET_SLUG=your-market-slug-here");
-          this.logger.info("   Get the slug from Polymarket URL: polymarket.com/event/MARKET-SLUG");
+          this.logger.info(
+            "   Get the slug from Polymarket URL: polymarket.com/event/MARKET-SLUG"
+          );
           throw new Error(
             `Market not found for token ID: ${this.config.targetTokenId}. ` +
-            `Please use MARKET_SLUG_PATTERN or TARGET_MARKET_SLUG instead (see logs above for instructions).`
+              `Please use MARKET_SLUG_PATTERN or TARGET_MARKET_SLUG instead (see logs above for instructions).`
           );
         }
       }
@@ -129,45 +183,59 @@ class PolymarketTradingBot {
 
       let currentSlug = this.config.targetMarketSlug;
       if (this.config.marketSlugPattern) {
-        const timePattern = this.config.marketSlugPattern.timePattern === "static" 
-          ? "hourly" 
-          : (this.config.marketSlugPattern.timePattern === "15min" ? "15min" : 
-             this.config.marketSlugPattern.timePattern === "daily" ? "daily" : "hourly");
+        const timePattern =
+          this.config.marketSlugPattern.timePattern === "static"
+            ? "hourly"
+            : this.config.marketSlugPattern.timePattern === "15min"
+            ? "15min"
+            : this.config.marketSlugPattern.timePattern === "daily"
+            ? "daily"
+            : "hourly";
         const pattern: MarketSlugPattern = {
           baseSlug: this.config.marketSlugPattern.baseSlug,
           timePattern: timePattern as "hourly" | "daily" | "15min" | "custom",
         };
         currentSlug = generateMarketSlug(pattern, new Date(), this.logger);
-        this.logger.debug(`Generated market slug for current time: ${currentSlug}`);
+        this.logger.debug(
+          `Generated market slug for current time: ${currentSlug}`
+        );
       }
 
       let market;
       if (currentSlug) {
         market = await getMarketBySlug(currentSlug, this.logger);
         if (!market && this.config.marketSlugPattern) {
-          const timePattern = this.config.marketSlugPattern.timePattern === "static" 
-            ? "hourly" 
-            : (this.config.marketSlugPattern.timePattern === "15min" ? "15min" : 
-               this.config.marketSlugPattern.timePattern === "daily" ? "daily" : "hourly");
+          const timePattern =
+            this.config.marketSlugPattern.timePattern === "static"
+              ? "hourly"
+              : this.config.marketSlugPattern.timePattern === "15min"
+              ? "15min"
+              : this.config.marketSlugPattern.timePattern === "daily"
+              ? "daily"
+              : "hourly";
           const pattern: MarketSlugPattern = {
             baseSlug: this.config.marketSlugPattern.baseSlug,
             timePattern: timePattern as "hourly" | "daily" | "15min" | "custom",
           };
           let nextSlug: string;
           let nextTime: Date;
-          
+
           if (this.config.marketSlugPattern.timePattern === "15min") {
             nextTime = new Date(Date.now() + 15 * 60 * 1000);
             nextSlug = generateMarketSlug(pattern, nextTime, this.logger);
-            this.logger.info(`Market not found for ${currentSlug}, trying next 15min: ${nextSlug}`);
+            this.logger.info(
+              `Market not found for ${currentSlug}, trying next 15min: ${nextSlug}`
+            );
           } else if (this.config.marketSlugPattern.timePattern === "hourly") {
             nextTime = new Date(Date.now() + 60 * 60 * 1000);
             nextSlug = generateMarketSlug(pattern, nextTime, this.logger);
-            this.logger.info(`Market not found for ${currentSlug}, trying next hour: ${nextSlug}`);
+            this.logger.info(
+              `Market not found for ${currentSlug}, trying next hour: ${nextSlug}`
+            );
           } else {
             nextSlug = currentSlug;
           }
-          
+
           if (nextSlug !== currentSlug) {
             market = await getMarketBySlug(nextSlug, this.logger);
             if (market) {
@@ -183,12 +251,14 @@ class PolymarketTradingBot {
       }
 
       if (!market) {
-        this.logger.warn(`Market not found for slug: ${currentSlug}, skipping cycle`);
+        this.logger.warn(
+          `Market not found for slug: ${currentSlug}, skipping cycle`
+        );
         return;
       }
 
       const { yesTokenId, noTokenId } = findTokenIdsForMarket(market, "YES");
-      
+
       if (!yesTokenId || !noTokenId) {
         this.logger.warn("Could not find YES/NO token IDs", {
           outcomes: market.outcomes,
@@ -208,9 +278,17 @@ class PolymarketTradingBot {
         yesTokenId,
         noTokenId,
       });
-      
-      const yesPrice = await getTokenPrice(this.clobClient, yesTokenId, this.logger);
-      const noPrice = await getTokenPrice(this.clobClient, noTokenId, this.logger);
+
+      const yesPrice = await getTokenPrice(
+        this.clobClient,
+        yesTokenId,
+        this.logger
+      );
+      const noPrice = await getTokenPrice(
+        this.clobClient,
+        noTokenId,
+        this.logger
+      );
 
       if (!yesPrice || !noPrice) {
         this.logger.warn("Could not fetch token prices");
@@ -251,14 +329,18 @@ class PolymarketTradingBot {
         const currentIntervalStart = Math.floor(now / intervalMs) * intervalMs;
         const intervalEnd = currentIntervalStart + intervalMs;
         timeUntilEnd = intervalEnd - now;
-        this.logger.debug(`Time until market end: ${Math.floor(timeUntilEnd / 1000)}s`);
+        this.logger.debug(
+          `Time until market end: ${Math.floor(timeUntilEnd / 1000)}s`
+        );
       } else if (this.config.marketSlugPattern?.timePattern === "hourly") {
         const now = Date.now();
         const intervalMs = 60 * 60 * 1000;
         const currentIntervalStart = Math.floor(now / intervalMs) * intervalMs;
         const intervalEnd = currentIntervalStart + intervalMs;
         timeUntilEnd = intervalEnd - now;
-        this.logger.debug(`Time until market end: ${Math.floor(timeUntilEnd / 1000)}s`);
+        this.logger.debug(
+          `Time until market end: ${Math.floor(timeUntilEnd / 1000)}s`
+        );
       }
 
       const context: StrategyContext = {
@@ -328,7 +410,9 @@ class PolymarketTradingBot {
     }
 
     this.isRunning = true;
-    this.logger.info(`Starting bot with ${this.config.pollIntervalMs}ms polling interval`);
+    this.logger.info(
+      `Starting bot with ${this.config.pollIntervalMs}ms polling interval`
+    );
 
     this.executeTradingCycle();
 
@@ -385,4 +469,3 @@ if (require.main === module) {
 }
 
 export { PolymarketTradingBot };
-

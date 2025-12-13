@@ -26,10 +26,14 @@ export async function initializeWallet(
 
     logger.info(`EOA Wallet initialized: ${address}`);
     logger.info(`Network: Polygon (Chain ID: ${config.polygonChainId})`);
-    logger.info(`Note: Polymarket uses gasless trading - only USDC.e needed, not MATIC`);
+    logger.info(
+      `Note: Polymarket uses gasless trading - only USDC.e needed, not MATIC`
+    );
 
     const balance = await provider.getBalance(address);
-    logger.info(`MATIC balance: ${balance.toString()} wei (not required for gasless trading)`);
+    logger.info(
+      `USDCe balance: ${balance.toString()} wei (not required for gasless trading)`
+    );
 
     let builderConfig: BuilderConfig | undefined;
     if (
@@ -46,7 +50,9 @@ export async function initializeWallet(
       });
       logger.info("Builder config initialized for RelayClient");
     } else {
-      logger.warn("Builder credentials not provided - RelayClient may not work properly");
+      logger.warn(
+        "Builder credentials not provided - RelayClient may not work properly"
+      );
     }
 
     const relayClient = new RelayClient(
@@ -57,7 +63,10 @@ export async function initializeWallet(
     );
 
     const contractConfig = getContractConfig(config.polygonChainId);
-    const safeAddress = deriveSafe(address, contractConfig.SafeContracts.SafeFactory);
+    const safeAddress = deriveSafe(
+      address,
+      contractConfig.SafeContracts.SafeFactory
+    );
     logger.info(`Safe (proxy) wallet address: ${safeAddress}`);
 
     let isDeployed = false;
@@ -74,21 +83,27 @@ export async function initializeWallet(
         const response = await relayClient.deploy();
         const result = await response.wait();
         if (result?.proxyAddress) {
-          logger.info(`Safe wallet deployed successfully at: ${result.proxyAddress}`);
+          logger.info(
+            `Safe wallet deployed successfully at: ${result.proxyAddress}`
+          );
         } else {
-          logger.warn("Safe deployment response missing proxyAddress, but continuing...");
+          logger.warn(
+            "Safe deployment response missing proxyAddress, but continuing..."
+          );
         }
       } catch (error: any) {
-        logger.error("Failed to deploy Safe wallet", { 
+        logger.error("Failed to deploy Safe wallet", {
           error: error?.message || String(error),
-          note: "You may need to deploy it manually via Polymarket website"
+          note: "You may need to deploy it manually via Polymarket website",
         });
       }
     } else {
       logger.info("Safe wallet already deployed");
     }
 
-    logger.info(`IMPORTANT: Send USDC.e to Safe address (${safeAddress}), not EOA address!`);
+    logger.info(
+      `IMPORTANT: Send USDC.e to Safe address (${safeAddress}), not EOA address!`
+    );
 
     return { wallet, provider, address, safeAddress, relayClient };
   } catch (error) {
@@ -115,8 +130,12 @@ export async function initializeClobClient(
     let apiCredentials;
     try {
       const derivedCreds = await tempClient.deriveApiKey().catch(() => null);
-      
-      if (derivedCreds?.key && derivedCreds?.secret && derivedCreds?.passphrase) {
+
+      if (
+        derivedCreds?.key &&
+        derivedCreds?.secret &&
+        derivedCreds?.passphrase
+      ) {
         apiCredentials = derivedCreds;
         logger.info("Derived existing API credentials");
       } else {
@@ -158,7 +177,9 @@ export async function initializeClobClient(
     );
 
     logger.info("CLOB client initialized successfully");
-    logger.info(`Using Safe wallet (${safeAddress}) as funder for gasless trading`);
+    logger.info(
+      `Using Safe wallet (${safeAddress}) as funder for gasless trading`
+    );
     logger.info(`EOA wallet (${eoaAddress}) is used for signing only`);
     return clobClient;
   } catch (error) {
@@ -166,4 +187,3 @@ export async function initializeClobClient(
     throw error;
   }
 }
-
