@@ -64,6 +64,8 @@ export class AltLabStrategy extends TradingStrategy {
     if (
       yesPosition &&
       yesPosition.size > 0 &&
+      timeUntilEnd &&
+      timeUntilEnd < 4 * 60 * 1000 &&
       (!noPosition || noPosition.size === 0)
     ) {
       const entryPrice =
@@ -95,6 +97,8 @@ export class AltLabStrategy extends TradingStrategy {
     if (
       noPosition &&
       noPosition.size > 0 &&
+      timeUntilEnd &&
+      timeUntilEnd < 4 * 60 * 1000 &&
       (!yesPosition || yesPosition.size === 0)
     ) {
       const entryPrice =
