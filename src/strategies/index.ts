@@ -4,6 +4,7 @@ import { MeanReversionStrategy } from "./meanReversion";
 
 import { ArbitrageStrategy } from "./arbitrage";
 import { OptimizedStrategy } from "./optimized";
+import { AltLabStrategy } from "./altlab";
 
 export * from "./base";
 export { BalancedStrategy } from "./balanced";
@@ -22,6 +23,7 @@ const strategies: Map<string, TradingStrategy> = new Map([
   ["meanReversion", new MeanReversionStrategy()],
   ["arbitrage", new ArbitrageStrategy()],
   ["optimized", new OptimizedStrategy()],
+  ["altlab", new AltLabStrategy()],
 ]);
 
 export function getStrategy(name: string): TradingStrategy | null {

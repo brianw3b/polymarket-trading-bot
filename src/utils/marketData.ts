@@ -88,7 +88,7 @@ export async function getMarketBySlug(
  * Get market information by token ID
  * Tries multiple search strategies to find the market:
  * 1. Search active markets
- * 2. Search closed markets  
+ * 2. Search closed markets
  * 3. Search all markets (no filters)
  * 4. Try with different pagination limits
  */
@@ -105,8 +105,8 @@ export async function getMarketByToken(
     let offset = 0;
 
     for (let page = 0; page < maxPages; page++) {
-      params.set('limit', limit.toString());
-      params.set('offset', offset.toString());
+      params.set("limit", limit.toString());
+      params.set("offset", offset.toString());
 
       try {
         const response = await fetch(
@@ -138,7 +138,9 @@ export async function getMarketByToken(
             id: market.id,
             question: market.question,
             outcomes: market.outcomes ? JSON.parse(market.outcomes) : [],
-            tokenIds: market.clobTokenIds ? JSON.parse(market.clobTokenIds) : [],
+            tokenIds: market.clobTokenIds
+              ? JSON.parse(market.clobTokenIds)
+              : [],
             active: market.active,
             closed: market.closed,
           };
@@ -160,12 +162,15 @@ export async function getMarketByToken(
 
   try {
     logger.debug("Searching active markets", { tokenId });
-    const activeParams = new URLSearchParams({ active: 'true', closed: 'false' });
+    const activeParams = new URLSearchParams({
+      active: "true",
+      closed: "false",
+    });
     const activeResult = await searchMarkets(activeParams, 10);
     if (activeResult) return activeResult;
 
     logger.debug("Searching closed markets", { tokenId });
-    const closedParams = new URLSearchParams({ closed: 'true' });
+    const closedParams = new URLSearchParams({ closed: "true" });
     const closedResult = await searchMarkets(closedParams, 10);
     if (closedResult) return closedResult;
 
@@ -175,13 +180,13 @@ export async function getMarketByToken(
     if (allResult) return allResult;
 
     logger.debug("Searching active markets (no closed filter)", { tokenId });
-    const activeOnlyParams = new URLSearchParams({ active: 'true' });
+    const activeOnlyParams = new URLSearchParams({ active: "true" });
     const activeOnlyResult = await searchMarkets(activeOnlyParams, 10);
     if (activeOnlyResult) return activeOnlyResult;
 
-    logger.warn("Market not found in paginated results", { 
+    logger.warn("Market not found in paginated results", {
       tokenId,
-      note: "Consider using getMarketBySlug for more reliable market lookup"
+      note: "Consider using getMarketBySlug for more reliable market lookup",
     });
     return null;
   } catch (error) {
@@ -201,14 +206,20 @@ export async function getTokenPrice(
 ): Promise<TokenPrice | null> {
   try {
     logger.debug("Fetching price for token", { tokenId });
-    
+
     const [bidPriceData, askPriceData] = await Promise.all([
       clobClient.getPrice(tokenId, Side.BUY).catch((err) => {
-        logger.warn("Failed to get bid price", { tokenId, error: err instanceof Error ? err.message : String(err) });
+        logger.warn("Failed to get bid price", {
+          tokenId,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return null;
       }),
       clobClient.getPrice(tokenId, Side.SELL).catch((err) => {
-        logger.warn("Failed to get ask price", { tokenId, error: err instanceof Error ? err.message : String(err) });
+        logger.warn("Failed to get ask price", {
+          tokenId,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return null;
       }),
     ]);
@@ -280,7 +291,6 @@ export async function getTokenPrice(
   }
 }
 
-
 export async function getUserPositions(
   userAddress: string,
   logger: Logger
@@ -323,18 +333,14 @@ export function findTokenIdsForMarket(
     return { yesTokenId: null, noTokenId: null };
   }
 
-  const yesIndex = market.outcomes.findIndex(
-    (o) => {
-      const upper = o.toUpperCase();
-      return upper === "YES" || upper === "FOR" || upper === "UP";
-    }
-  );
-  const noIndex = market.outcomes.findIndex(
-    (o) => {
-      const upper = o.toUpperCase();
-      return upper === "NO" || upper === "AGAINST" || upper === "DOWN";
-    }
-  );
+  const yesIndex = market.outcomes.findIndex((o) => {
+    const upper = o.toUpperCase();
+    return upper === "YES" || upper === "FOR" || upper === "UP";
+  });
+  const noIndex = market.outcomes.findIndex((o) => {
+    const upper = o.toUpperCase();
+    return upper === "NO" || upper === "AGAINST" || upper === "DOWN";
+  });
 
   if (yesIndex >= 0 && noIndex >= 0) {
     return {
@@ -364,4 +370,3 @@ export function findTokenIdsForMarket(
     noTokenId: market.tokenIds[1] || null,
   };
 }
-
