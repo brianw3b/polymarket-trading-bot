@@ -317,7 +317,7 @@ class PolymarketTradingBot {
         },
       });
 
-      const walletAddress = await this.clobClient.signer.getAddress();
+      const walletAddress = this.clobClient.orderBuilder.funderAddress;
       const positions = await getUserPositions(walletAddress, this.logger);
 
       this.logger.info(`Current positions: ${positions.length}`);

@@ -73,13 +73,20 @@ export function loadConfig(): BotConfig {
     // Trading
     targetTokenId: process.env.TARGET_TOKEN_ID,
     targetMarketSlug: process.env.TARGET_MARKET_SLUG,
-    marketSlugPattern: process.env.MARKET_SLUG_PATTERN_BASE && process.env.MARKET_SLUG_PATTERN_TIME
-      ? {
-          baseSlug: process.env.MARKET_SLUG_PATTERN_BASE,
-          timePattern: (process.env.MARKET_SLUG_PATTERN_TIME as "hourly" | "daily" | "15min" | "static") || "hourly",
-        }
-      : undefined,
-    tradingStrategy: getEnvVar("TRADING_STRATEGY", "balanced"),
+    marketSlugPattern:
+      process.env.MARKET_SLUG_PATTERN_BASE &&
+      process.env.MARKET_SLUG_PATTERN_TIME
+        ? {
+            baseSlug: process.env.MARKET_SLUG_PATTERN_BASE,
+            timePattern:
+              (process.env.MARKET_SLUG_PATTERN_TIME as
+                | "hourly"
+                | "daily"
+                | "15min"
+                | "static") || "hourly",
+          }
+        : undefined,
+    tradingStrategy: getEnvVar("TRADING_STRATEGY", "altlab"),
     orderSize: getEnvNumber("ORDER_SIZE", 10),
     minPrice: getEnvNumber("MIN_PRICE", 0.01),
     maxPrice: getEnvNumber("MAX_PRICE", 0.99),
@@ -89,11 +96,10 @@ export function loadConfig(): BotConfig {
     // Risk Management
     maxPositionSize: getEnvNumber("MAX_POSITION_SIZE", 100),
     stopLossPercentage: getEnvNumber("STOP_LOSS_PERCENTAGE", 0.05),
-    takeProfitPercentage: getEnvNumber("TAKE_PROFIT_PERCENTAGE", 0.10),
+    takeProfitPercentage: getEnvNumber("TAKE_PROFIT_PERCENTAGE", 0.1),
 
     // Logging
     logLevel: getEnvVar("LOG_LEVEL", "info"),
     logFile: getEnvVar("LOG_FILE", "logs/bot.log"),
   };
 }
-

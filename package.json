@@ -29,6 +29,7 @@
     "@polymarket/builder-relayer-client": "^0.0.6",
     "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client": "^4.22.8",
+    "axios": "^1.13.2",
     "dotenv": "^16.0.2",
     "ethers": "^5.8.0",
     "node-cron": "^3.0.3",
