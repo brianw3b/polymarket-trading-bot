@@ -100,9 +100,7 @@ class PolymarketTradingBot {
         throw new Error(
           `Unknown strategy: ${this.config.tradingStrategy}. Available: ${[
             "balanced",
-            "meanReversion",
-            "momentum",
-            "arbitrage",
+            "altlab",
           ].join(", ")}`
         );
       }
