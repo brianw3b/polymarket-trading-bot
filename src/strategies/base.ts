@@ -22,6 +22,8 @@ export interface StrategyContext {
     maxPositionSize: number;
     stopLossPercentage?: number;
     takeProfitPercentage?: number;
+    // Extended config options for improved strategies (optional)
+    [key: string]: number | undefined; // Allow additional numeric config values
   };
 }
 
@@ -30,6 +32,14 @@ export abstract class TradingStrategy {
   abstract description: string;
 
   abstract execute(context: StrategyContext): TradingDecision | null;
+
+  /**
+   * Reset strategy state (called when starting a new pool/market)
+   * Override in subclasses to reset internal state
+   */
+  reset(): void {
+    // Default: no-op, subclasses can override
+  }
 
   protected validatePrice(price: number, minPrice: number, maxPrice: number): boolean {
     return price >= minPrice && price <= maxPrice;
