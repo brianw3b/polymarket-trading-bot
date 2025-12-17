@@ -85,9 +85,8 @@ export class KarasStrategy extends TradingStrategy {
     // Approximate total spent from entries (we don't have live PnL here)
     this.totalCostEstimate = this.estimateTotalCost();
 
-    // Hard pool-level constraints
-    const maxPoolCost = this.getConfigValue(config, "karasMaxPoolCost", 100); // USD cap per 15m pool
-    const minSafePayoffRatio = this.getConfigValue(config, "karasMinSafePayoffRatio", 0.5); // best-case payoff must be >= 50% of cost
+    // Hard pool-level constraint (total USD per 15m pool)
+    const maxPoolCost = this.getConfigValue(config, "karasPoolBudgetUsd", 100);
 
     // If we've already spent too much, do not add more risk
     if (this.totalCostEstimate >= maxPoolCost) {
@@ -155,8 +154,10 @@ export class KarasStrategy extends TradingStrategy {
   ): TradingDecision | null {
     const minHigherPrice = this.getConfigValue(config, "phase1MinHigherPrice", 0.52);
     const maxHigherPrice = this.getConfigValue(config, "phase1MaxHigherPrice", 0.59);
-    const probeSizeMin = this.getConfigValue(config, "phase1ProbeSizeMin", 10);
-    const probeSizeMax = this.getConfigValue(config, "phase1ProbeSizeMax", 30);
+    // USD-based probe size
+    const phase1ProbeUsd = this.getConfigValue(config, "phase1ProbeUsd", 2.0);
+    const poolBudgetUsd = this.getConfigValue(config, "karasPoolBudgetUsd", 100);
+    const maxHigherUsd = this.getConfigValue(config, "karasMaxHigherUsd", poolBudgetUsd);
     const maxProjectedAvg = this.getConfigValue(config, "phase1MaxProjectedAvg", 0.6);
 
     if (higherPrice < minHigherPrice || higherPrice > maxHigherPrice) {
@@ -167,17 +168,42 @@ export class KarasStrategy extends TradingStrategy {
     if (this.higherEntries.length > 0) {
       return null;
     }
+    const higherUsd = this.higherEntries.reduce(
+      (sum, e) => sum + e.price * e.size,
+      0
+    );
+    const lowerUsd = this.lowerEntries.reduce(
+      (sum, e) => sum + e.price * e.size,
+      0
+    );
+    const totalUsd = higherUsd + lowerUsd;
 
-    const probeSize = Math.floor((probeSizeMin + probeSizeMax) / 2);
+    // Respect pool and side USD budgets
+    const remainingPoolUsd = poolBudgetUsd - totalUsd;
+    const remainingHigherUsd = maxHigherUsd - higherUsd;
+    const maxAffordableUsd = Math.min(remainingPoolUsd, remainingHigherUsd);
+    if (maxAffordableUsd <= 0) {
+      return null;
+    }
+
+    const tradeUsd = Math.min(phase1ProbeUsd, maxAffordableUsd);
+
+    // Convert USD to shares
+    const rawSize = tradeUsd / higherPrice;
+    const probeSize = Math.floor(rawSize);
+    if (probeSize <= 0) {
+      return null;
+    }
+
     const projectedAvg = higherPrice;
     if (projectedAvg >= maxProjectedAvg) {
       return null;
     }
 
-    // Simulate payoff profile after probe
+    // Simulate payoff profile after probe using actual USD spent
     const newHigherSize = probeSize;
     const newLowerSize = 0;
-    const newTotalCost = this.totalCostEstimate + higherPrice * probeSize;
+    const newTotalCost = totalUsd + higherPrice * probeSize;
     if (!this.isPayoffProfileSafe(newHigherSize, newLowerSize, newTotalCost, config)) {
       return null;
     }
@@ -219,17 +245,34 @@ export class KarasStrategy extends TradingStrategy {
     config: StrategyContext["config"]
   ): TradingDecision | null {
     const dipThreshold = this.getConfigValue(config, "phase2DipThreshold", 0.025);
-    const addSizeMin = this.getConfigValue(config, "phase2AddSizeMin", 40);
-    const addSizeMax = this.getConfigValue(config, "phase2AddSizeMax", 120);
+    // USD-based add sizes for higher leg
+    const higherAddUsdMin = this.getConfigValue(config, "phase2HigherAddUsdMin", 2.0);
+    const higherAddUsdMax = this.getConfigValue(config, "phase2HigherAddUsdMax", 4.0);
 
-    const lowerSizeMin = this.getConfigValue(config, "phase2LowerSizeMin", 80);
-    const lowerSizeMax = this.getConfigValue(config, "phase2LowerSizeMax", 150);
-    const lowerSizeRatioTarget = this.getConfigValue(config, "phase2LowerSizeRatio", 0.7);
+    // USD-based add sizes for lower leg
+    const lowerAddUsdMin = this.getConfigValue(config, "phase2LowerAddUsdMin", 2.0);
+    const lowerAddUsdMax = this.getConfigValue(config, "phase2LowerAddUsdMax", 4.0);
+    const lowerUsdRatioTarget = this.getConfigValue(config, "phase2LowerUsdRatio", 0.7);
 
     const targetPairCost = this.getConfigValue(config, "phase2TargetPairCost", 0.965);
     const minBalanceRatio = this.getConfigValue(config, "phase2MinBalanceRatio", 0.6);
 
     const totalSize = higherSize + lowerSize;
+
+    // Pool and side USD budgets
+    const poolBudgetUsd = this.getConfigValue(config, "karasPoolBudgetUsd", 100);
+    const maxHigherUsd = this.getConfigValue(config, "karasMaxHigherUsd", poolBudgetUsd);
+    const maxLowerUsd = this.getConfigValue(config, "karasMaxLowerUsd", poolBudgetUsd);
+
+    const higherUsd = this.higherEntries.reduce(
+      (sum, e) => sum + e.price * e.size,
+      0
+    );
+    const lowerUsd = this.lowerEntries.reduce(
+      (sum, e) => sum + e.price * e.size,
+      0
+    );
+    const totalUsd = higherUsd + lowerUsd;
 
     // Hard exposure rule: if lower side is very under-hedged (< 0.3 ratio), disallow new higher-leg risk
     const currentBalanceRatio =
@@ -237,7 +280,7 @@ export class KarasStrategy extends TradingStrategy {
         ? Math.min(higherSize, lowerSize) / Math.max(higherSize, lowerSize)
         : 0;
 
-    // 1) Try higher-leg avg-down if allowed
+    // 1) Try higher-leg avg-down if allowed (USD-based)
     if (
       avgHigher > 0 &&
       higherPrice <= avgHigher - dipThreshold &&
@@ -246,78 +289,120 @@ export class KarasStrategy extends TradingStrategy {
     ) {
       const dipAmount = avgHigher - higherPrice;
       const sizeMultiplier = Math.min(4, Math.floor(dipAmount / 0.01));
-      const addSize = Math.min(addSizeMax, addSizeMin + sizeMultiplier * 20);
 
-      const totalHigherSize = higherSize + addSize;
-      const totalHigherCost = avgHigher * higherSize + higherPrice * addSize;
-      const newHigherAvg = totalHigherSize > 0 ? totalHigherCost / totalHigherSize : avgHigher;
+      // Map dip depth to USD amount between [higherAddUsdMin, higherAddUsdMax]
+      const extraUsd = Math.min(
+        higherAddUsdMax - higherAddUsdMin,
+        sizeMultiplier * ((higherAddUsdMax - higherAddUsdMin) / 4)
+      );
+      let tradeUsd = higherAddUsdMin + Math.max(0, extraUsd);
 
-      const newPairCost = newHigherAvg + effectiveAvgLower;
-      if (newPairCost < currentPairCost || currentPairCost === 0) {
-        const newHigherSize = totalHigherSize;
-        const newLowerSize = lowerSize;
-        const newTotalCost = this.totalCostEstimate + higherPrice * addSize;
+      // Respect pool and side budgets
+      const remainingPoolUsd = poolBudgetUsd - totalUsd;
+      const remainingHigherUsd = maxHigherUsd - higherUsd;
+      const maxAffordableUsd = Math.min(remainingPoolUsd, remainingHigherUsd);
+      if (maxAffordableUsd > 0) {
+        tradeUsd = Math.min(tradeUsd, maxAffordableUsd);
 
-        if (
-          newPairCost <= targetPairCost &&
-          this.isBalanceSafe(newHigherSize, newLowerSize, minBalanceRatio) &&
-          this.isPayoffProfileSafe(newHigherSize, newLowerSize, newTotalCost, config)
-        ) {
-          this.higherEntries.push({ price: higherPrice, size: addSize });
-          this.totalCostEstimate = newTotalCost;
+        // Convert USD to shares
+        const rawSize = tradeUsd / higherPrice;
+        const addSize = Math.floor(rawSize);
+        if (addSize > 0) {
+          const totalHigherSize = higherSize + addSize;
+          const totalHigherCost = avgHigher * higherSize + higherPrice * addSize;
+          const newHigherAvg =
+            totalHigherSize > 0 ? totalHigherCost / totalHigherSize : avgHigher;
 
-          return {
-            action: yesIsHigher ? "BUY_YES" : "BUY_NO",
-            tokenId: higherTokenId,
-            price: higherPrice,
-            size: addSize,
-            reason: `Karas Phase2 Avg-Down Higher: dip ${(dipAmount * 100).toFixed(
-              2
-            )}¢ from avg ${avgHigher.toFixed(4)}, add=${addSize}`,
-          };
+          const newPairCost = newHigherAvg + effectiveAvgLower;
+          if (newPairCost < currentPairCost || currentPairCost === 0) {
+            const newHigherSize = totalHigherSize;
+            const newLowerSize = lowerSize;
+            const newTotalCost = totalUsd + higherPrice * addSize;
+
+            if (
+              newPairCost <= targetPairCost &&
+              this.isBalanceSafe(newHigherSize, newLowerSize, minBalanceRatio) &&
+              this.isPayoffProfileSafe(newHigherSize, newLowerSize, newTotalCost, config)
+            ) {
+              this.higherEntries.push({ price: higherPrice, size: addSize });
+              this.totalCostEstimate = newTotalCost;
+
+              return {
+                action: yesIsHigher ? "BUY_YES" : "BUY_NO",
+                tokenId: higherTokenId,
+                price: higherPrice,
+                size: addSize,
+                reason: `Karas Phase2 Avg-Down Higher: dip ${(dipAmount * 100).toFixed(
+                  2
+                )}¢ from avg ${avgHigher.toFixed(4)}, add=${addSize}`,
+              };
+            }
+          }
         }
       }
     }
 
-    // 2) Lower-leg dynamic dip: relative to higher or average band, not fixed <= 0.48
+    // 2) Lower-leg dynamic dip: relative to higher or average band, not fixed <= 0.48 (USD-based)
     const dynamicLowerDip =
       effectiveAvgHigher - this.getConfigValue(config, "phase2LowerDipSpread", 0.05);
     const absoluteLowerCap = this.getConfigValue(config, "phase2LowerDipAbsCap", 0.52);
     const allowedLowerPrice = Math.min(dynamicLowerDip, absoluteLowerCap);
 
-    if (lowerPrice <= allowedLowerPrice && lowerSize < higherSize * lowerSizeRatioTarget) {
-      const targetLowerSize = Math.floor(higherSize * lowerSizeRatioTarget);
-      const rawAdd = targetLowerSize - lowerSize;
-      const addSize = Math.min(lowerSizeMax, Math.max(lowerSizeMin, rawAdd));
+    if (lowerPrice <= allowedLowerPrice && higherUsd > 0) {
+      // Target lower USD exposure as a fraction of higher USD
+      const targetLowerUsd = higherUsd * lowerUsdRatioTarget;
+      const neededUsd = targetLowerUsd - lowerUsd;
+      if (neededUsd > 0) {
+        let tradeUsd = Math.min(
+          lowerAddUsdMax,
+          Math.max(lowerAddUsdMin, neededUsd)
+        );
 
-      const totalLowerSize = lowerSize + addSize;
-      const totalLowerCost = (avgLower > 0 ? avgLower * lowerSize : 0) + lowerPrice * addSize;
-      const newLowerAvg =
-        totalLowerSize > 0 ? totalLowerCost / totalLowerSize : lowerPrice;
+        // Respect pool and side budgets
+        const remainingPoolUsd = poolBudgetUsd - totalUsd;
+        const remainingLowerUsd = maxLowerUsd - lowerUsd;
+        const maxAffordableUsd = Math.min(remainingPoolUsd, remainingLowerUsd);
+        if (maxAffordableUsd <= 0) {
+          // Can't afford more lower-leg exposure
+        } else {
+          tradeUsd = Math.min(tradeUsd, maxAffordableUsd);
 
-      const newPairCost = effectiveAvgHigher + newLowerAvg;
-      const newHigherSize = higherSize;
-      const newLowerSize = totalLowerSize;
-      const newTotalCost = this.totalCostEstimate + lowerPrice * addSize;
+          // Convert USD to shares
+          const rawSize = tradeUsd / lowerPrice;
+          const addSize = Math.floor(rawSize);
+          if (addSize > 0) {
+            const totalLowerSize = lowerSize + addSize;
+            const totalLowerCost =
+              (avgLower > 0 ? avgLower * lowerSize : 0) + lowerPrice * addSize;
+            const newLowerAvg =
+              totalLowerSize > 0 ? totalLowerCost / totalLowerSize : lowerPrice;
 
-      if (
-        (newPairCost < currentPairCost || currentPairCost === 0) &&
-        newPairCost <= targetPairCost &&
-        this.isBalanceSafe(newHigherSize, newLowerSize, minBalanceRatio) &&
-        this.isPayoffProfileSafe(newHigherSize, newLowerSize, newTotalCost, config)
-      ) {
-        this.lowerEntries.push({ price: lowerPrice, size: addSize });
-        this.totalCostEstimate = newTotalCost;
+            const newPairCost = effectiveAvgHigher + newLowerAvg;
+            const newHigherSize = higherSize;
+            const newLowerSize = totalLowerSize;
+            const newTotalCost = totalUsd + lowerPrice * addSize;
 
-        return {
-          action: yesIsHigher ? "BUY_NO" : "BUY_YES",
-          tokenId: lowerTokenId,
-          price: lowerPrice,
-          size: addSize,
-          reason: `Karas Phase2 Lower Dip: lower @ ${lowerPrice.toFixed(
-            4
-          )} (dyn<=${allowedLowerPrice.toFixed(4)}, target=${targetLowerSize}, add=${addSize})`,
-        };
+            if (
+              (newPairCost < currentPairCost || currentPairCost === 0) &&
+              newPairCost <= targetPairCost &&
+              this.isBalanceSafe(newHigherSize, newLowerSize, minBalanceRatio) &&
+              this.isPayoffProfileSafe(newHigherSize, newLowerSize, newTotalCost, config)
+            ) {
+              this.lowerEntries.push({ price: lowerPrice, size: addSize });
+              this.totalCostEstimate = newTotalCost;
+
+              return {
+                action: yesIsHigher ? "BUY_NO" : "BUY_YES",
+                tokenId: lowerTokenId,
+                price: lowerPrice,
+                size: addSize,
+                reason: `Karas Phase2 Lower Dip: lower @ ${lowerPrice.toFixed(
+                  4
+                )} (dyn<=${allowedLowerPrice.toFixed(4)}, usd=${tradeUsd.toFixed(2)}, add=${addSize})`,
+              };
+            }
+          }
+        }
       }
     }
 

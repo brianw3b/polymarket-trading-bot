@@ -689,8 +689,9 @@ export class RealMarketStrategyTester {
    * Columns: time, cycle, action, side, price, size, cost, cum_side_qty, avg_side_price, total_spent
    */
   private writeTradeHistory(result: TestResult): void {
-    const ordersFile =
-      process.env.TEST_ORDERS_FILE || "logs/test-orders-history.csv";
+    // Use strategy-specific file name so different strategies don't mix histories
+    const defaultFile = `logs/test-orders-history-${this.strategyName}.csv`;
+    const ordersFile = process.env.TEST_ORDERS_FILE || defaultFile;
     const dir = path.dirname(ordersFile);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
