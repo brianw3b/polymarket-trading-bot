@@ -1,19 +1,12 @@
 import { TradingStrategy } from "./base";
-import { BalancedStrategy } from "./balanced";
-import { AltLabStrategy } from "./altlab";
-import { DipScaleStrategy } from "./dipScale";
-import { ImprovedDipScaleStrategy } from "./improvedDipScale";
-import { KarasStrategy } from "./karas";
-import { LiamStrategy } from "./liam";
+
+import { LadderScaleStrategy } from "./ladderScale";
 
 export * from "./base";
 export { BalancedStrategy } from "./balanced";
 export { AltLabStrategy } from "./altlab";
 export { DipScaleStrategy } from "./dipScale";
 export { ImprovedDipScaleStrategy } from "./improvedDipScale";
-export { KarasStrategy } from "./karas";
-export { LiamStrategy } from "./liam";
-
 
 export {
   TimeBasedMarketStrategy,
@@ -22,12 +15,7 @@ export {
 } from "./timeBasedMarket";
 
 const strategies: Map<string, TradingStrategy> = new Map([
-  ["balanced", new BalancedStrategy()],
-  ["altlab", new AltLabStrategy()],
-  ["dipscale", new DipScaleStrategy()],
-  ["improvedipscale", new ImprovedDipScaleStrategy()],
-  ["karas", new KarasStrategy()],
-  ["liam", new LiamStrategy()],
+  ["ladderScale", new LadderScaleStrategy()],
 ]);
 
 export function getStrategy(name: string): TradingStrategy | null {

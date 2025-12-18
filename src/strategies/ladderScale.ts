@@ -39,8 +39,8 @@ import { TokenPrice, Position } from "../utils/marketData";
  * ---------------------
  * - If pair_cost ≤ 0.965 and balance_ratio ≥ 0.75 (and asym ≤ 0.75) → HOLD to settlement.
  */
-export class LiamStrategy extends TradingStrategy {
-  name = "liam";
+export class LadderScaleStrategy extends TradingStrategy {
+  name = "ladderScale";
   description = "Share-based dip-scale / hedge strategy with reversal trigger and ladder orders";
 
   // Track entry prices with sizes for weighted averages
@@ -247,11 +247,7 @@ export class LiamStrategy extends TradingStrategy {
     }
 
     const probeSize = Math.floor((probeSizeMin + probeSizeMax) / 2); // ~20 shares
-    const projectedAvg = higherPrice;
-    if (projectedAvg >= maxProjectedAvg) {
-      return null;
-    }
-
+    
     // Ladder offsets: -0.01, -0.03
     const priceOffsets = [-0.01, -0.03];
     const offset = priceOffsets[this.entryOrdersPlaced] ?? priceOffsets[priceOffsets.length - 1];
@@ -259,6 +255,18 @@ export class LiamStrategy extends TradingStrategy {
 
     // Only place first order at current price, subsequent at ladder prices
     const actualPrice = this.entryOrdersPlaced === 0 ? higherPrice : limitPrice;
+    
+    // Calculate projected average after all ladder orders (2 orders total)
+    // Simulate both orders to get projected weighted average
+    const totalPlannedSize = probeSize * 2; // 2 ladder orders
+    const firstOrderPrice = higherPrice;
+    const secondOrderPrice = Math.max(0.01, higherPrice + priceOffsets[1]);
+    const projectedTotalCost = firstOrderPrice * probeSize + secondOrderPrice * probeSize;
+    const projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+    
+    if (projectedAvg >= maxProjectedAvg) {
+      return null;
+    }
 
     this.entryOrdersPlaced++;
     this.higherEntries.push({ price: actualPrice, size: probeSize });
@@ -639,5 +647,4 @@ export class LiamStrategy extends TradingStrategy {
     return totalSize > 0 ? totalCost / totalSize : 0;
   }
 }
-
 
