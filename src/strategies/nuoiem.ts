@@ -186,8 +186,8 @@ export class NuoiemStrategy extends TradingStrategy {
     if (currentPairCost > 0.95 && now - this.lastPairCheck >= 5000) {
       this.lastPairCheck = now;
       
-      // Check if we can add to higher leg (dip ≥2.5¢)
-      if (avgHigher > 0 && higherSize > 0 && higherPrice <= avgHigher - 0.025) {
+      // Check if we can add to higher leg (dip ≥1.5¢)
+      if (avgHigher > 0 && higherSize > 0 && higherPrice <= avgHigher - 0.015) {
         const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
         if (addSize > 0) {
           // Ladder offsets: -0.01, -0.02 for repeat adds
@@ -223,8 +223,8 @@ export class NuoiemStrategy extends TradingStrategy {
         }
       }
 
-      // Check if we can add to lower leg (dip ≥2.5¢)
-      if (avgLower > 0 && lowerSize > 0 && lowerPrice <= avgLower - 0.025) {
+      // Check if we can add to lower leg (dip ≥1.5¢)
+      if (avgLower > 0 && lowerSize > 0 && lowerPrice <= avgLower - 0.015) {
         const addSize = this.computeLowerAddSizeForPair(higherSize, lowerSize);
         if (addSize > 0) {
           // Ladder offsets: -0.02, -0.03 for repeat adds to lower
@@ -280,27 +280,34 @@ export class NuoiemStrategy extends TradingStrategy {
       }
     }
 
-    // 2. Avg-down higher: If dips ≥2.5¢ from avg (prioritized)
+    // 2. Avg-down higher: If dips ≥1.5¢ from avg (prioritized)
+    // Also allow if price is below average (even small dips) to build position
     if (avgHigher > 0 && higherSize > 0) {
-      const avgDownDecision = this.avgDownHigher(
-        higherTokenId,
-        higherPrice,
-        higherSize,
-        lowerSize,
-        avgHigher,
-        effectiveAvgHigher,
-        effectiveAvgLower,
-        currentPairCost,
-        yesIsHigher,
-        config
-      );
-      if (avgDownDecision) {
-        return avgDownDecision;
+      // Allow avg-down on any dip, but prioritize larger dips
+      const hasDip = higherPrice < avgHigher;
+      if (hasDip) {
+        const avgDownDecision = this.avgDownHigher(
+          higherTokenId,
+          higherPrice,
+          higherSize,
+          lowerSize,
+          avgHigher,
+          effectiveAvgHigher,
+          effectiveAvgLower,
+          currentPairCost,
+          yesIsHigher,
+          config
+        );
+        if (avgDownDecision) {
+          return avgDownDecision;
+        }
       }
     }
 
-    // 3. Hedge lower: Anytime lower <0.51
-    if (lowerPrice < 0.51 && higherSize > 0) {
+    // 3. Hedge lower: Anytime lower <0.51, or if balance is off and lower is attractive
+    // Also allow hedging if lower is <0.52 and we need to balance
+    const needsHedge = lowerSize < higherSize * 0.65; // If lower is less than 65% of higher
+    if ((lowerPrice < 0.51 || (lowerPrice < 0.52 && needsHedge)) && higherSize > 0) {
       const hedgeDecision = this.hedgeLower(
         lowerTokenId,
         lowerPrice,
@@ -410,13 +417,17 @@ export class NuoiemStrategy extends TradingStrategy {
     yesIsHigher: boolean,
     config: StrategyContext["config"]
   ): TradingDecision | null {
-    const dipThreshold = 0.025; // 2.5¢
+    const dipThreshold = 0.015; // 1.5¢ (reduced from 2.5¢ to allow more avg-down opportunities)
     const targetPairCost = 0.95;
     const minBalanceRatio = 0.70;
     const maxAsymRatio = 0.75;
 
-    if (avgHigher > 0 && higherPrice <= avgHigher - dipThreshold) {
-      const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
+    // Allow avg-down on any dip below average, but size based on dip amount
+    if (avgHigher > 0 && higherPrice < avgHigher) {
+      const actualDip = avgHigher - higherPrice;
+      // Only proceed if dip is meaningful (≥0.01) or if we need to balance
+      if (actualDip >= 0.01 || (higherSize > 0 && lowerSize > 0 && currentPairCost > 0.93)) {
+        const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
       if (addSize > 0) {
         // Ladder offsets: -0.01, -0.02 for avg-down
         const priceOffsets = [-0.01, -0.02];
@@ -450,6 +461,7 @@ export class NuoiemStrategy extends TradingStrategy {
             reason: `Nuoiem Avg-Down: higher dip ${((avgHigher - higherPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)} (ladder ${this.avgDownOrdersPlaced})`,
           };
         }
+      }
       }
     }
 
@@ -673,7 +685,9 @@ export class NuoiemStrategy extends TradingStrategy {
     const baseMax = 140;
     const targetLowerSize = Math.floor(higherSize * 0.7);
     const needed = targetLowerSize - lowerSize;
-    if (needed <= 0) return 0;
+    // Allow adding even if close to target (within 10 shares) to maintain balance
+    if (needed <= -10) return 0; // Already well above target
+    if (needed <= 0) return Math.min(baseMax, baseMin); // Close to target, add minimum
     return Math.min(baseMax, Math.max(baseMin, needed));
   }
 
