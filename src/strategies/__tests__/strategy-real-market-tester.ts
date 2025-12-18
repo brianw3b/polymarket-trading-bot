@@ -98,10 +98,8 @@ export class RealMarketStrategyTester {
     if (!strat) {
       throw new Error(
         `Unknown strategy "${envStrategy}". Available: ${[
-          "balanced",
-          "altlab",
-          "dipscale",
-          "timebased",
+          "ladderScale",
+          "nuoiem",
         ].join(", ")}`
       );
     }
@@ -148,33 +146,37 @@ export class RealMarketStrategyTester {
         baseSlug: this.config.marketSlugPattern.baseSlug,
         timePattern: timePattern as "hourly" | "daily" | "15min" | "custom",
       };
-      
+
       // Try current interval, then next intervals if market doesn't exist yet
       // For 15min markets: try current, +15min, +30min
       // For hourly: try current, +1hr, +2hr
       const maxRetries = 3;
-      const intervalMinutes = timePattern === "15min" ? 15 : timePattern === "hourly" ? 60 : 1440;
-      
+      const intervalMinutes =
+        timePattern === "15min" ? 15 : timePattern === "hourly" ? 60 : 1440;
+
       for (let attempt = 0; attempt < maxRetries; attempt++) {
         const offsetMinutes = attempt * intervalMinutes;
         const targetDate = new Date(Date.now() + offsetMinutes * 60 * 1000);
         const slug = generateMarketSlug(pattern, targetDate, this.logger);
-        
-        this.logger.info("Fetching market by slug", { 
-          slug, 
-          attempt: attempt + 1, 
+
+        this.logger.info("Fetching market by slug", {
+          slug,
+          attempt: attempt + 1,
           maxRetries,
-          offsetMinutes 
+          offsetMinutes,
         });
         market = await getMarketBySlug(slug, this.logger);
-        
+
         if (market) {
           this.logger.info("Market found", { slug, attempt: attempt + 1 });
           break;
         }
-        
-        this.logger.warn("Market not found by slug", { slug, attempt: attempt + 1 });
-        
+
+        this.logger.warn("Market not found by slug", {
+          slug,
+          attempt: attempt + 1,
+        });
+
         if (attempt < maxRetries - 1) {
           // Wait a bit before trying next interval
           await new Promise((r) => setTimeout(r, 2000));
@@ -193,7 +195,9 @@ export class RealMarketStrategyTester {
     }
 
     if (!market) {
-      throw new Error("Failed to load market information - market not found after retries");
+      throw new Error(
+        "Failed to load market information - market not found after retries"
+      );
     }
 
     const { yesTokenId, noTokenId } = findTokenIdsForMarket(market, "YES");
@@ -276,8 +280,7 @@ export class RealMarketStrategyTester {
       return;
     }
 
-    const isBuy =
-      decision.action === "BUY_YES" || decision.action === "BUY_NO";
+    const isBuy = decision.action === "BUY_YES" || decision.action === "BUY_NO";
     const isSell = decision.action === "SELL";
 
     const tokenId = decision.tokenId;
@@ -288,8 +291,7 @@ export class RealMarketStrategyTester {
     // Find or create position
     let position = this.positions.find((p) => p.asset === tokenId);
     if (!position) {
-      const side: "YES" | "NO" =
-        tokenId === this.yesTokenId ? "YES" : "NO";
+      const side: "YES" | "NO" = tokenId === this.yesTokenId ? "YES" : "NO";
       position = { asset: tokenId, size: 0, side };
       this.positions.push(position);
     }
@@ -319,7 +321,11 @@ export class RealMarketStrategyTester {
     const side = tokenId === this.yesTokenId ? "YES" : "NO";
 
     this.logger.info(
-      `[Cycle ${this.cycle}] 📈 ${decision.action} ${side} @ $${price.toFixed(4)} | Size: ${size.toFixed(2)} | Cost: $${cost.toFixed(2)} | Total Spent: $${pnl.totalUsdSpent.toFixed(2)}`,
+      `[Cycle ${this.cycle}] 📈 ${decision.action} ${side} @ $${price.toFixed(
+        4
+      )} | Size: ${size.toFixed(2)} | Cost: $${cost.toFixed(
+        2
+      )} | Total Spent: $${pnl.totalUsdSpent.toFixed(2)}`,
       {
         action: decision.action,
         side,
@@ -332,7 +338,10 @@ export class RealMarketStrategyTester {
     );
   }
 
-  private calculatePnl(yesPrice: TokenPrice, noPrice: TokenPrice): {
+  private calculatePnl(
+    yesPrice: TokenPrice,
+    noPrice: TokenPrice
+  ): {
     yesSize: number;
     noSize: number;
     yesUsd: number;
@@ -413,10 +422,16 @@ export class RealMarketStrategyTester {
     }
 
     const pnl = this.calculatePnl(yesPrice, noPrice);
-    
+
     // Clear, simple PnL display
     this.logger.info(
-      `[Cycle ${this.cycle}] 💰 PnL: ${pnl.pnl >= 0 ? "+" : ""}$${pnl.pnl.toFixed(2)} (${pnl.pnlPercent >= 0 ? "+" : ""}${pnl.pnlPercent.toFixed(2)}%) | Spent: $${pnl.totalUsdSpent.toFixed(2)} | Value: $${pnl.currentValue.toFixed(2)}`,
+      `[Cycle ${this.cycle}] 💰 PnL: ${
+        pnl.pnl >= 0 ? "+" : ""
+      }$${pnl.pnl.toFixed(2)} (${
+        pnl.pnlPercent >= 0 ? "+" : ""
+      }${pnl.pnlPercent.toFixed(2)}%) | Spent: $${pnl.totalUsdSpent.toFixed(
+        2
+      )} | Value: $${pnl.currentValue.toFixed(2)}`,
       {
         totalUsdSpent: pnl.totalUsdSpent.toFixed(2),
         currentValue: pnl.currentValue.toFixed(2),
@@ -553,16 +568,22 @@ export class RealMarketStrategyTester {
         lastTimeUntilEnd < 5 * 60 * 1000 && // we were in the last 5 minutes
         timeUntilEnd > lastTimeUntilEnd + 60 * 1000 // and suddenly jumped by > 1 minute
       ) {
-        this.logger.info("Detected new pool interval, ending current pool run", {
-          lastTimeUntilEndMs: lastTimeUntilEnd,
-          newTimeUntilEndMs: timeUntilEnd,
-        });
+        this.logger.info(
+          "Detected new pool interval, ending current pool run",
+          {
+            lastTimeUntilEndMs: lastTimeUntilEnd,
+            newTimeUntilEndMs: timeUntilEnd,
+          }
+        );
         break;
       }
 
       lastTimeUntilEnd = timeUntilEnd;
 
-      if (elapsed >= maxDurationMs || (timeUntilEnd !== undefined && timeUntilEnd <= 0)) {
+      if (
+        elapsed >= maxDurationMs ||
+        (timeUntilEnd !== undefined && timeUntilEnd <= 0)
+      ) {
         break;
       }
 
@@ -646,7 +667,7 @@ export class RealMarketStrategyTester {
     const durationSec = ((end.getTime() - start.getTime()) / 1000).toFixed(1);
     const pnlSign = pnl >= 0 ? "+" : "";
     const pnlPercentSign = pnlPercent >= 0 ? "+" : "";
-    
+
     return `
 ╔═══════════════════════════════════════════════════════════╗
 ║  Real-Market Strategy Test Results (${this.strategyName})        ║
@@ -658,7 +679,9 @@ export class RealMarketStrategyTester {
 ╠═══════════════════════════════════════════════════════════╣
 ║  💵 TOTAL USD SPENT:     $${totalUsdSpent.toFixed(2)}
 ║  💰 CURRENT VALUE:       $${currentValue.toFixed(2)}
-║  📊 PnL:                 ${pnlSign}$${pnl.toFixed(2)} (${pnlPercentSign}${pnlPercent.toFixed(2)}%)
+║  📊 PnL:                 ${pnlSign}$${pnl.toFixed(
+      2
+    )} (${pnlPercentSign}${pnlPercent.toFixed(2)}%)
 ╠═══════════════════════════════════════════════════════════╣
 ║  Log file: ${process.env.TEST_LOG_FILE || "logs/test-strategy.log"}
 ╚═══════════════════════════════════════════════════════════╝
@@ -667,17 +690,21 @@ export class RealMarketStrategyTester {
 
   printReport(result: TestResult): void {
     console.log(result.summary);
-    
+
     if (result.trades.length > 0) {
       console.log("\n📋 Recent Trades (last 10):");
       const recent = result.trades.slice(-10);
       recent.forEach((t, idx) => {
         const side = t.tokenId === this.yesTokenId ? "YES" : "NO";
         console.log(
-          `  ${idx + 1}. [Cycle ${t.cycle}] ${t.action} ${side} @ $${t.price.toFixed(4)} | Size: ${t.size.toFixed(2)} | Cost: $${t.cost.toFixed(2)}`
+          `  ${idx + 1}. [Cycle ${t.cycle}] ${
+            t.action
+          } ${side} @ $${t.price.toFixed(4)} | Size: ${t.size.toFixed(
+            2
+          )} | Cost: $${t.cost.toFixed(2)}`
         );
       });
-      
+
       if (result.trades.length > 10) {
         console.log(`\n  ... and ${result.trades.length - 10} more trades`);
       }
@@ -771,14 +798,13 @@ export class RealMarketStrategyTester {
    * Columns:
    * run_start,run_end,strategy,market,total_cycles,total_trades,
    * total_spent,current_value,pnl,pnl_percent
-   * 
+   *
    * Writes to strategy-specific file: logs/test-summary-history-{strategy}.csv
    */
   private writeSummaryHistory(result: TestResult): void {
     // Use strategy-specific file name
     const defaultFile = `logs/test-summary-history-${this.strategyName}.csv`;
-    const summaryFile =
-      process.env.TEST_SUMMARY_FILE || defaultFile;
+    const summaryFile = process.env.TEST_SUMMARY_FILE || defaultFile;
     const dir = path.dirname(summaryFile);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -787,8 +813,7 @@ export class RealMarketStrategyTester {
     const header =
       "run_start,run_end,strategy,market,total_cycles,total_trades,total_spent,current_value,pnl,pnl_percent\n";
 
-    const market =
-      result.marketInfo?.question?.replace(/,/g, " ") || "N/A";
+    const market = result.marketInfo?.question?.replace(/,/g, " ") || "N/A";
 
     const line = [
       result.startTime.toISOString(),
@@ -824,10 +849,7 @@ if (require.main === module) {
       const interval = getEnvNumber("TEST_CYCLE_INTERVAL_MS", 5000);
       const realtime = process.env.TEST_REALTIME === "true";
       const continuous = process.env.TEST_CONTINUOUS_POOLS === "true";
-      const maxPools = getEnvNumber(
-        "TEST_MAX_POOLS",
-        Number.MAX_SAFE_INTEGER
-      );
+      const maxPools = getEnvNumber("TEST_MAX_POOLS", Number.MAX_SAFE_INTEGER);
       let virtualBankroll = Number(process.env.TEST_START_BANKROLL || "100");
 
       if (continuous && realtime) {
@@ -873,5 +895,3 @@ if (require.main === module) {
     }
   })();
 }
-
-

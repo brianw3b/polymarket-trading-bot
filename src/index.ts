@@ -30,13 +30,9 @@ class PolymarketTradingBot {
       this.logger.info("Initializing Polymarket Trading Bot...");
       this.logger.info(`Strategy: ${this.config.tradingStrategy}`);
 
-      if (
-        !this.config.targetTokenId &&
-        !this.config.targetMarketSlug &&
-        !this.config.marketSlugPattern
-      ) {
+      if (!this.config.targetMarketSlug && !this.config.marketSlugPattern) {
         throw new Error(
-          "Either TARGET_TOKEN_ID, TARGET_MARKET_SLUG, or MARKET_SLUG_PATTERN must be provided in .env file"
+          "Either TARGET_MARKET_SLUG, or MARKET_SLUG_PATTERN must be provided in .env file"
         );
       }
 
@@ -99,8 +95,8 @@ class PolymarketTradingBot {
       if (!this.strategy) {
         throw new Error(
           `Unknown strategy: ${this.config.tradingStrategy}. Available: ${[
-            "balanced",
-            "altlab",
+            "ladderScale",
+            "nuoiem",
           ].join(", ")}`
         );
       }

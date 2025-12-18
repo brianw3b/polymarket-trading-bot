@@ -62,7 +62,7 @@ export function loadConfig(): BotConfig {
 
     // Polymarket API
     clobApiUrl: getEnvVar("CLOB_API_URL", "https://clob.polymarket.com"),
-    relayerUrl: getEnvVar("RELAYER_URL", "https://relayer-v2.polymarket.com/"),
+    relayerUrl: getEnvVar("RELAYER_URL", "https://relayer-v2.polymarket.com"),
     polygonChainId: getEnvNumber("POLYGON_CHAIN_ID", 137),
 
     // Builder Credentials (optional)
@@ -70,8 +70,6 @@ export function loadConfig(): BotConfig {
     builderSecret: process.env.POLYMARKET_BUILDER_SECRET,
     builderPassphrase: process.env.POLYMARKET_BUILDER_PASSPHRASE,
 
-    // Trading
-    targetTokenId: process.env.TARGET_TOKEN_ID,
     targetMarketSlug: process.env.TARGET_MARKET_SLUG,
     marketSlugPattern:
       process.env.MARKET_SLUG_PATTERN_BASE &&
@@ -86,7 +84,7 @@ export function loadConfig(): BotConfig {
                 | "static") || "hourly",
           }
         : undefined,
-    tradingStrategy: getEnvVar("TRADING_STRATEGY", "altlab"),
+    tradingStrategy: getEnvVar("TRADING_STRATEGY", "nuoiem"),
     orderSize: getEnvNumber("ORDER_SIZE", 10),
     minPrice: getEnvNumber("MIN_PRICE", 0.01),
     maxPrice: getEnvNumber("MAX_PRICE", 0.99),
@@ -103,5 +101,3 @@ export function loadConfig(): BotConfig {
     logFile: getEnvVar("LOG_FILE", "logs/bot.log"),
   };
 }
-
-

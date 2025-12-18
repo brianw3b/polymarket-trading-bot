@@ -228,3 +228,4 @@ export default function MarketDetail({ slug, tokenId }: MarketDetailProps) {
 
 
 
+
