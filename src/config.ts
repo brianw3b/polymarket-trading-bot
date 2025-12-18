@@ -90,7 +90,7 @@ export function loadConfig(): BotConfig {
     orderSize: getEnvNumber("ORDER_SIZE", 10),
     minPrice: getEnvNumber("MIN_PRICE", 0.01),
     maxPrice: getEnvNumber("MAX_PRICE", 0.99),
-    pollIntervalMs: getEnvNumber("POLL_INTERVAL_MS", 5000),
+    pollIntervalMs: getEnvNumber("POLL_INTERVAL_MS", 1000),
     maxOrdersPerCycle: getEnvNumber("MAX_ORDERS_PER_CYCLE", 1),
 
     // Risk Management
@@ -103,3 +103,5 @@ export function loadConfig(): BotConfig {
     logFile: getEnvVar("LOG_FILE", "logs/bot.log"),
   };
 }
+
+

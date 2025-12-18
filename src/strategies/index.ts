@@ -3,10 +3,8 @@ import { TradingStrategy } from "./base";
 import { LadderScaleStrategy } from "./ladderScale";
 
 export * from "./base";
-export { BalancedStrategy } from "./balanced";
-export { AltLabStrategy } from "./altlab";
-export { DipScaleStrategy } from "./dipScale";
-export { ImprovedDipScaleStrategy } from "./improvedDipScale";
+
+export { LadderScaleStrategy } from "./ladderScale";
 
 export {
   TimeBasedMarketStrategy,
@@ -14,9 +12,9 @@ export {
   createTimeBasedPattern,
 } from "./timeBasedMarket";
 
-const strategies: Map<string, TradingStrategy> = new Map([
-  ["ladderScale", new LadderScaleStrategy()],
-]);
+// Register all available strategies using the common TradingStrategy base type
+const strategies: Map<string, TradingStrategy> = new Map();
+strategies.set("ladderScale", new LadderScaleStrategy());
 
 export function getStrategy(name: string): TradingStrategy | null {
   return strategies.get(name) || null;

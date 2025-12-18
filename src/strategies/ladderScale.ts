@@ -2,9 +2,10 @@ import { TradingStrategy, TradingDecision, StrategyContext } from "./base";
 import { TokenPrice, Position } from "../utils/marketData";
 
 /**
- * Liam Strategy
+ * LadderScale Strategy
  *
  * Share-based dip-scaling / hedge strategy for 15-minute markets.
+ * Only tracks successful orders (positions) - ignores failed orders completely.
  *
  * Entry / Build Logic
  * -------------------
@@ -43,14 +44,12 @@ export class LadderScaleStrategy extends TradingStrategy {
   name = "ladderScale";
   description = "Share-based dip-scale / hedge strategy with reversal trigger and ladder orders";
 
-  // Track entry prices with sizes for weighted averages
+  // Track entry prices with sizes for weighted averages (only successful orders)
   private higherEntries: Array<{ price: number; size: number }> = [];
   private lowerEntries: Array<{ price: number; size: number }> = [];
   private higherLeg: "YES" | "NO" | null = null;
   private lastReversalCheck: number = 0;
   private reversalOrdersPlaced: number = 0;
-  private entryOrdersPlaced: number = 0; // Track entry ladder orders
-  private hedgeOrdersPlaced: number = 0; // Track hedge ladder orders
 
   reset(): void {
     this.higherEntries = [];
@@ -58,8 +57,6 @@ export class LadderScaleStrategy extends TradingStrategy {
     this.higherLeg = null;
     this.lastReversalCheck = 0;
     this.reversalOrdersPlaced = 0;
-    this.entryOrdersPlaced = 0;
-    this.hedgeOrdersPlaced = 0;
   }
 
   execute(context: StrategyContext): TradingDecision | null {
@@ -86,6 +83,9 @@ export class LadderScaleStrategy extends TradingStrategy {
     const lowerPosition = positions.find((p) => p.asset === lowerTokenId);
     const higherSize = higherPosition?.size || 0;
     const lowerSize = lowerPosition?.size || 0;
+
+    // Sync entries with actual positions (only track successful orders)
+    this.syncEntriesWithPositions(higherSize, lowerSize, higherPosition, lowerPosition);
 
     // Weighted averages from entries
     const avgHigher = this.calculateWeightedAverage(this.higherEntries);
@@ -157,14 +157,17 @@ export class LadderScaleStrategy extends TradingStrategy {
     // All other actions available anytime (no phase restrictions)
 
     // 1. Entry: Identify higher leg and probe (if no higher position yet)
-    if (higherSize === 0) {
+    // Only try entry if we have no position and haven't placed 2 ladder orders yet
+    const entryOrdersCount = this.higherEntries.length;
+    if (higherSize === 0 && entryOrdersCount < 2) {
       const entryDecision = this.entryPhase(
         higherTokenId,
         lowerTokenId,
         higherPrice,
         lowerPrice,
         yesIsHigher,
-        config
+        config,
+        entryOrdersCount
       );
       if (entryDecision) {
         return entryDecision;
@@ -224,7 +227,8 @@ export class LadderScaleStrategy extends TradingStrategy {
     higherPrice: number,
     lowerPrice: number,
     yesIsHigher: boolean,
-    config: StrategyContext["config"]
+    config: StrategyContext["config"],
+    currentEntryCount: number
   ): TradingDecision | null {
     const minHigherPrice = 0.52;
     const maxHigherPrice = 0.57;
@@ -236,47 +240,48 @@ export class LadderScaleStrategy extends TradingStrategy {
       return null;
     }
 
-    // Only allow up to 2 ladder orders for entry
-    if (this.entryOrdersPlaced >= 2) {
-      return null;
-    }
-
-    // Check if we already have a position
-    if (this.higherEntries.length > 0 && this.entryOrdersPlaced >= 2) {
-      return null;
-    }
-
     const probeSize = Math.floor((probeSizeMin + probeSizeMax) / 2); // ~20 shares
     
     // Ladder offsets: -0.01, -0.03
     const priceOffsets = [-0.01, -0.03];
-    const offset = priceOffsets[this.entryOrdersPlaced] ?? priceOffsets[priceOffsets.length - 1];
+    const offset = priceOffsets[currentEntryCount] ?? priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, higherPrice + offset);
 
     // Only place first order at current price, subsequent at ladder prices
-    const actualPrice = this.entryOrdersPlaced === 0 ? higherPrice : limitPrice;
+    const actualPrice = currentEntryCount === 0 ? higherPrice : limitPrice;
     
     // Calculate projected average after all ladder orders (2 orders total)
-    // Simulate both orders to get projected weighted average
-    const totalPlannedSize = probeSize * 2; // 2 ladder orders
-    const firstOrderPrice = higherPrice;
-    const secondOrderPrice = Math.max(0.01, higherPrice + priceOffsets[1]);
-    const projectedTotalCost = firstOrderPrice * probeSize + secondOrderPrice * probeSize;
-    const projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+    // For first order: simulate both orders
+    // For second order: use actual first order from entries
+    let projectedAvg: number;
+    if (currentEntryCount === 0) {
+      // First order: simulate both orders
+      const totalPlannedSize = probeSize * 2;
+      const firstOrderPrice = higherPrice;
+      const secondOrderPrice = Math.max(0.01, higherPrice + priceOffsets[1]);
+      const projectedTotalCost = firstOrderPrice * probeSize + secondOrderPrice * probeSize;
+      projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+    } else {
+      // Second order: use actual first order from entries
+      const firstEntry = this.higherEntries[0];
+      const firstOrderPrice = firstEntry.price;
+      const secondOrderPrice = limitPrice;
+      const totalPlannedSize = firstEntry.size + probeSize;
+      const projectedTotalCost = firstOrderPrice * firstEntry.size + secondOrderPrice * probeSize;
+      projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+    }
     
     if (projectedAvg >= maxProjectedAvg) {
       return null;
     }
 
-    this.entryOrdersPlaced++;
-    this.higherEntries.push({ price: actualPrice, size: probeSize });
-
+    // Don't add to entries here - only add when order succeeds (in syncEntriesWithPositions)
     return {
       action: yesIsHigher ? "BUY_YES" : "BUY_NO",
       tokenId: higherTokenId,
       price: actualPrice,
       size: probeSize,
-      reason: `Liam Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${this.entryOrdersPlaced}/2), probe ${probeSize} shares`,
+      reason: `LadderScale Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${currentEntryCount + 1}/2), probe ${probeSize} shares`,
     };
   }
 
@@ -325,7 +330,7 @@ export class LadderScaleStrategy extends TradingStrategy {
             tokenId: higherTokenId,
             price: higherPrice,
             size: addSize,
-            reason: `Liam Avg-Down: higher dip ${((avgHigher - higherPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${higherPrice.toFixed(4)}`,
+            reason: `LadderScale Avg-Down: higher dip ${((avgHigher - higherPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${higherPrice.toFixed(4)}`,
           };
         }
       }
@@ -358,11 +363,12 @@ export class LadderScaleStrategy extends TradingStrategy {
     if (addSize > 0) {
       // Ladder offsets: -0.02, -0.05
       const priceOffsets = [-0.02, -0.05];
-      const offset = priceOffsets[this.hedgeOrdersPlaced] ?? priceOffsets[priceOffsets.length - 1];
+      const hedgeOrdersCount = this.lowerEntries.length;
+      const offset = priceOffsets[hedgeOrdersCount] ?? priceOffsets[priceOffsets.length - 1];
       const limitPrice = Math.max(0.01, lowerPrice + offset);
 
       // Only place first order at current price, subsequent at ladder prices
-      const actualPrice = this.hedgeOrdersPlaced === 0 ? lowerPrice : limitPrice;
+      const actualPrice = hedgeOrdersCount === 0 ? lowerPrice : limitPrice;
 
       const decision = this.simulateAdd(
         "LOWER",
@@ -379,17 +385,16 @@ export class LadderScaleStrategy extends TradingStrategy {
         true // apply extra hedge constraints
       );
 
-      if (decision) {
-        this.hedgeOrdersPlaced++;
-        this.lowerEntries.push({ price: actualPrice, size: addSize });
-        return {
-          action: yesIsHigher ? "BUY_NO" : "BUY_YES",
-          tokenId: lowerTokenId,
-          price: actualPrice,
-          size: addSize,
-          reason: `Liam Hedge: lower @ ${actualPrice.toFixed(4)} (ladder ${this.hedgeOrdersPlaced}), add ${addSize}`,
-        };
-      }
+        if (decision) {
+          // Don't add to entries here - only add when order succeeds (in syncEntriesWithPositions)
+          return {
+            action: yesIsHigher ? "BUY_NO" : "BUY_YES",
+            tokenId: lowerTokenId,
+            price: actualPrice,
+            size: addSize,
+            reason: `LadderScale Hedge: lower @ ${actualPrice.toFixed(4)}, add ${addSize}`,
+          };
+        }
     }
 
     return null;
@@ -420,7 +425,7 @@ export class LadderScaleStrategy extends TradingStrategy {
         tokenId: "",
         price: 0,
         size: 0,
-        reason: `Liam Lock: pair_cost=${pairCost.toFixed(4)} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
+        reason: `LadderScale Lock: pair_cost=${pairCost.toFixed(4)} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
           2
         )}, asym=${asymRatio.toFixed(2)}`,
       };
@@ -520,14 +525,14 @@ export class LadderScaleStrategy extends TradingStrategy {
     }
 
     this.reversalOrdersPlaced++;
-    this.lowerEntries.push({ price: limitPrice, size: roundedSize });
+    // Don't add to entries here - only add when order succeeds (in syncEntriesWithPositions)
 
     return {
       action: yesIsHigher ? "BUY_NO" : "BUY_YES",
       tokenId: lowerTokenId,
       price: limitPrice,
       size: roundedSize,
-      reason: `Liam Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(higherPrice + priceDiffThreshold).toFixed(
+      reason: `LadderScale Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(higherPrice + priceDiffThreshold).toFixed(
         4
       )}, buy ${roundedSize} @ ${limitPrice.toFixed(4)} (order ${this.reversalOrdersPlaced}/3)`,
     };
@@ -645,6 +650,56 @@ export class LadderScaleStrategy extends TradingStrategy {
     const totalCost = entries.reduce((sum, e) => sum + e.price * e.size, 0);
     const totalSize = entries.reduce((sum, e) => sum + e.size, 0);
     return totalSize > 0 ? totalCost / totalSize : 0;
+  }
+
+  /**
+   * Sync entries arrays with actual positions
+   * Only track successful orders (orders that resulted in positions)
+   * Simple approach: if position size increased, add new entry with estimated price
+   */
+  private syncEntriesWithPositions(
+    higherSize: number,
+    lowerSize: number,
+    higherPosition: Position | undefined,
+    lowerPosition: Position | undefined
+  ): void {
+    // Calculate total size from entries
+    const higherEntriesSize = this.higherEntries.reduce((sum, e) => sum + e.size, 0);
+    const lowerEntriesSize = this.lowerEntries.reduce((sum, e) => sum + e.size, 0);
+
+    // If position grew, add new entry (successful order)
+    if (higherSize > higherEntriesSize) {
+      const newSize = higherSize - higherEntriesSize;
+      // Estimate price: use average of existing entries, or default estimate
+      const estimatedPrice = this.higherEntries.length > 0
+        ? this.calculateWeightedAverage(this.higherEntries)
+        : 0.55;
+      this.higherEntries.push({ price: estimatedPrice, size: newSize });
+    } else if (higherSize < higherEntriesSize) {
+      // Position decreased (sold/redeemed) - rebuild entries to match
+      if (higherSize > 0) {
+        const estimatedPrice = this.calculateWeightedAverage(this.higherEntries);
+        this.higherEntries = [{ price: estimatedPrice, size: higherSize }];
+      } else {
+        this.higherEntries = [];
+      }
+    }
+
+    // Same for lower leg
+    if (lowerSize > lowerEntriesSize) {
+      const newSize = lowerSize - lowerEntriesSize;
+      const estimatedPrice = this.lowerEntries.length > 0
+        ? this.calculateWeightedAverage(this.lowerEntries)
+        : 0.50;
+      this.lowerEntries.push({ price: estimatedPrice, size: newSize });
+    } else if (lowerSize < lowerEntriesSize) {
+      if (lowerSize > 0) {
+        const estimatedPrice = this.calculateWeightedAverage(this.lowerEntries);
+        this.lowerEntries = [{ price: estimatedPrice, size: lowerSize }];
+      } else {
+        this.lowerEntries = [];
+      }
+    }
   }
 }
 
