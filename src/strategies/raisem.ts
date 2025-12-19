@@ -2,32 +2,32 @@ import { TradingStrategy, TradingDecision, StrategyContext } from "./base";
 import { TokenPrice, Position } from "../utils/marketData";
 
 /**
- * Nuoiem Strategy
+ * Raisem Strategy v0
  *
  * Entry:
- * - Identify higher leg (price ≥0.52): limit buy 10-30 shares higher at ≤0.57 (small probe).
- *   (ladder @current -0.01/-0.03). projected avg_higher <0.60 or skip.
- * - Hedge lower: anytime lower <0.51 and sim new_pair ≤0.95 and new_min(USD_value) > total_cost*1.02
+ * - Identify higher leg (price ≥0.52): limit buy 10-30 shares higher at ≤0.56 (small probe and ladder @current -0.02/-0.05).
+ *   projected avg_higher <0.60 or skip.
+ * - Hedge lower: anytime lower <0.51 and sim new_pair ≤0.95 and new_min(qty) > total_cost*1.02
  *   (ladder 70-140 shares @current-0.02/-0.05; match ~70% higher qty).
- * - Avg-down higher leg: If dips ≥2.5¢ from avg, add 50-150 shares ladder.
- * - Repeat check every 5s if pair >0.95, add more to both legs (dip ≥2.5¢ below leg avg) to lower the pair_cost.
+ * - avg-Down Loop, recursive on both legs: If dips ≥2.5¢ from leg avg (wobble), add 50-150 shares ladder.
+ *   Repeat check every 5s if historical_pair >0.95 to lower the pair_cost.
  *
  * Flow:
  * - Prioritize higher wobbles, then lower opportunities. target pair ≤0.95; asym 0.60-0.75; balance ≥0.75.
- * - Before any add: sim new_pair_cost < current and new_balance ≥0.70 and new_asym ≤0.75.
- * - Unsafe pause: If pair_cost >0.95 after any add (checked post-fill), pause all further adds
+ * - Before any add: sim new_historical_pair < current_historical_pair and projected_pair with add <0.95
+ *   and new_balance ≥0.70 and new_asym ≤0.75 and pair improvement >0.01 (forces clusters).
  *
- * Reversal Trigger (after the first 2 minutes, check every 1s, ≥6min Left):
- * - If lower_price ≥ higher_price +0.08 and balance_ratio <0.80: Add 25-40% lower qty ladder.
- * - Execute only if new_pair ≤0.95 and new_min(USD_value) > total_cost*1.02 and new_asym ≤0.75.
+ * Reversal Trigger (after the first 2 minutes, check every 1s, <6min Left):
+ * - If lower_price ≥ higher_price +0.09 and balance_ratio <0.80: Add 25-40% lower qty ladder.
+ * - Execute only if new_pair ≤0.95 and new_min(qty) > total_cost*1.02 and new_asym ≤0.75.
  *
  * Lock/Exit (9-15min):
  * - Hold to settlement If pair_cost ≤0.95 and balance_ratio ≥0.75 (min(qty) covers ≥75% exposure, asym ≤0.75), full hold.
  */
-export class NuoiemStrategy extends TradingStrategy {
-  name = "nuoiem";
+export class RaisemStrategy extends TradingStrategy {
+  name = "raisem";
   description =
-    "Nuoiem strategy with entry, hedge, avg-down, reversal trigger, and lock/exit conditions";
+    "Raisem strategy v0 with entry, hedge, recursive avg-down, reversal trigger, and lock/exit conditions";
 
   // Track entry prices with sizes for weighted averages (only successful orders)
   private higherEntries: Array<{ price: number; size: number }> = [];
@@ -36,10 +36,10 @@ export class NuoiemStrategy extends TradingStrategy {
   private lastReversalCheck: number = 0;
   private reversalOrdersPlaced: number = 0;
   private lastPairCheck: number = 0; // For 5s repeat check
-  private isPaused: boolean = false; // Unsafe pause flag
-  private avgDownOrdersPlaced: number = 0; // Track avg-down ladder orders
-  private repeatAddsHigherCount: number = 0; // Track repeat adds to higher leg
-  private repeatAddsLowerCount: number = 0; // Track repeat adds to lower leg
+  private avgDownOrdersPlacedHigher: number = 0; // Track avg-down ladder orders for higher
+  private avgDownOrdersPlacedLower: number = 0; // Track avg-down ladder orders for lower
+  private historicalPairCosts: number[] = []; // Track historical pair costs for improvement checks
+  private lastAvgDownCheck: number = 0; // For recursive avg-down checks
 
   reset(): void {
     this.higherEntries = [];
@@ -48,10 +48,10 @@ export class NuoiemStrategy extends TradingStrategy {
     this.lastReversalCheck = 0;
     this.reversalOrdersPlaced = 0;
     this.lastPairCheck = 0;
-    this.isPaused = false;
-    this.avgDownOrdersPlaced = 0;
-    this.repeatAddsHigherCount = 0;
-    this.repeatAddsLowerCount = 0;
+    this.avgDownOrdersPlacedHigher = 0;
+    this.avgDownOrdersPlacedLower = 0;
+    this.historicalPairCosts = [];
+    this.lastAvgDownCheck = 0;
   }
 
   execute(context: StrategyContext): TradingDecision | null {
@@ -119,58 +119,29 @@ export class NuoiemStrategy extends TradingStrategy {
     // Time metrics
     const timeUntilEndMs = timeUntilEnd || 0;
     const minutesRemaining = timeUntilEndMs / (60 * 1000);
-    // For 15-minute markets: if 13 minutes remaining, 2 minutes have passed
-    // Reversal trigger: after 2 minutes (13 min remaining) until 6 minutes remaining
 
     // When only one side is open, there is no completed hedge yet.
     const currentPairCost = higherSize > 0 && lowerSize > 0 ? pairCost : 0;
-    
-    // Calculate current market pair cost (based on current prices, not entry prices)
-    // This allows recovery when market conditions improve even if entry was poor
-    const currentMarketPairCost = higherPrice + lowerPrice;
 
-    // Check unsafe pause condition: if pair_cost >0.95 after any add, pause
-    // Use slightly higher threshold (0.96) to avoid premature pausing
-    const pauseThreshold = 0.96;
-    if (currentPairCost > pauseThreshold) {
-      this.isPaused = true;
-    }
-
-    // Market-based recovery: Allow recovery trades when current market pair cost < 0.95
-    // even if entry-based pair cost > 0.96. This enables recovery when market conditions improve.
-    const marketRecoveryThreshold = 0.95;
-    const allowMarketRecovery = this.isPaused && currentMarketPairCost < marketRecoveryThreshold;
-
-    // If paused and pair cost is still above threshold, check for market recovery
-    if (this.isPaused && currentPairCost > pauseThreshold) {
-      // Allow recovery if market conditions improved
-      if (!allowMarketRecovery) {
-        // Still allow lock/exit check
-        if (minutesRemaining >= 9 && minutesRemaining <= 15) {
-          const lockDecision = this.lockExitPhase(
-            pairCost,
-            balanceRatio,
-            asymRatio,
-            config
-          );
-          if (lockDecision) {
-            return lockDecision;
-          }
-        }
-        return null;
+    // Track historical pair cost (only when both legs are open)
+    if (currentPairCost > 0) {
+      this.historicalPairCosts.push(currentPairCost);
+      // Keep only last 100 entries to avoid memory issues
+      if (this.historicalPairCosts.length > 100) {
+        this.historicalPairCosts.shift();
       }
-      // Market recovery allowed - continue with trading logic below
     }
 
-    // If pair cost improved to acceptable level, resume
-    if (this.isPaused && currentPairCost <= 0.95) {
-      this.isPaused = false;
-    }
-    
-    // If market recovery is active, temporarily allow trading
-    // (will be checked again in individual decision functions)
+    // Calculate current historical pair cost (average of recent history)
+    const currentHistoricalPair =
+      this.historicalPairCosts.length > 0
+        ? this.historicalPairCosts.reduce((a, b) => a + b, 0) /
+          this.historicalPairCosts.length
+        : currentPairCost;
 
-    // Lock/Exit (9-15min) - check first
+    // Lock/Exit (9-15min remaining) - check first
+    // Note: Assuming this means remaining time 9-15min (early-to-mid market)
+    // If description meant time passed, this would be remaining 0-6min
     if (minutesRemaining >= 9 && minutesRemaining <= 15) {
       const lockDecision = this.lockExitPhase(
         pairCost,
@@ -183,10 +154,10 @@ export class NuoiemStrategy extends TradingStrategy {
       }
     }
 
-    // Reversal Trigger (after first 2 minutes, check every 1s, ≥6min left)
-    // For 15-min market: after 2 min = 13 min remaining, check until 6 min remaining
-    // So check when: 13 >= minutesRemaining >= 6
-    if (minutesRemaining <= 13 && minutesRemaining >= 6) {
+    // Reversal Trigger (after first 2 minutes, check every 1s, <6min left)
+    // For 15-min market: after 2 min = 13 min remaining, check when remaining <6min
+    // So check when: 13 >= minutesRemaining && minutesRemaining < 6
+    if (minutesRemaining <= 13 && minutesRemaining < 6) {
       const now = Date.now();
       if (now - this.lastReversalCheck >= 1000) {
         this.lastReversalCheck = now;
@@ -206,6 +177,7 @@ export class NuoiemStrategy extends TradingStrategy {
           asymRatio,
           yesIsHigher,
           currentPairCost,
+          currentHistoricalPair,
           config
         );
         if (reversalDecision) {
@@ -214,105 +186,101 @@ export class NuoiemStrategy extends TradingStrategy {
       }
     }
 
-    // Repeat check every 5s if pair >0.95, add more to both legs (dip ≥2.5¢ below leg avg)
-    // Also allow if market recovery is active (currentMarketPairCost < 0.95)
+    // Avg-Down Loop: Repeat check every 5s if historical_pair >0.95
     const now = Date.now();
-    const allowRepeatCheck = (currentPairCost > 0.95 || allowMarketRecovery) && now - this.lastPairCheck >= 5000;
-    if (allowRepeatCheck) {
-      this.lastPairCheck = now;
-      const dipThresholdRepeat = 0.025; // 2.5¢ - as per strategy specification
-      const emergencyDipThresholdRepeat = 0.015; // 1.5¢ for emergency recovery
-      // Use relaxed threshold for market recovery
-      const effectiveDipThresholdRepeat = allowMarketRecovery ? emergencyDipThresholdRepeat : dipThresholdRepeat;
-      // Use market pair cost for validation in recovery mode
-      const effectiveCurrentPairCostForRepeat = allowMarketRecovery ? currentMarketPairCost : currentPairCost;
+    const allowAvgDownCheck =
+      currentHistoricalPair > 0.95 && now - this.lastAvgDownCheck >= 5000;
+    if (allowAvgDownCheck) {
+      this.lastAvgDownCheck = now;
 
-      // Check if we can add to higher leg (dip ≥effectiveDipThresholdRepeat)
-      if (avgHigher > 0 && higherSize > 0 && higherPrice <= avgHigher - effectiveDipThresholdRepeat) {
-        const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
-        if (addSize > 0) {
-          // Ladder offsets: -0.01, -0.02 for repeat adds
-          const priceOffsets = [-0.01, -0.02];
-          const offset =
-            priceOffsets[this.repeatAddsHigherCount] ??
-            priceOffsets[priceOffsets.length - 1];
-          const limitPrice = Math.max(0.01, higherPrice + offset);
-          const actualPrice =
-            this.repeatAddsHigherCount === 0 ? higherPrice : limitPrice;
+      // Check higher leg wobble (prioritize higher wobbles)
+      if (avgHigher > 0 && higherSize > 0) {
+        const dipThreshold = 0.025; // 2.5¢
+        if (higherPrice <= avgHigher - dipThreshold) {
+          const addSize = this.computeAvgDownSize(higherPrice, avgHigher);
+          if (addSize > 0) {
+            const priceOffsets = [-0.02, -0.05];
+            const offset =
+              priceOffsets[this.avgDownOrdersPlacedHigher] ??
+              priceOffsets[priceOffsets.length - 1];
+            const limitPrice = Math.max(0.01, higherPrice + offset);
+            const actualPrice =
+              this.avgDownOrdersPlacedHigher === 0 ? higherPrice : limitPrice;
 
-          const decision = this.simulateAdd(
-            "HIGHER",
-            addSize,
-            actualPrice,
-            higherSize,
-            lowerSize,
-            effectiveAvgHigher,
-            effectiveAvgLower,
-            effectiveCurrentPairCostForRepeat,
-            0.95,
-            0.7,
-            0.75
-          );
+            const decision = this.simulateAddWithHistorical(
+              "HIGHER",
+              addSize,
+              actualPrice,
+              higherSize,
+              lowerSize,
+              effectiveAvgHigher,
+              effectiveAvgLower,
+              currentPairCost,
+              currentHistoricalPair,
+              0.95,
+              0.7,
+              0.75
+            );
 
-          if (decision) {
-            this.repeatAddsHigherCount++;
-            return {
-              action: yesIsHigher ? "BUY_YES" : "BUY_NO",
-              tokenId: higherTokenId,
-              price: actualPrice,
-              size: addSize,
-              reason: `Nuoiem Pair>0.95: higher dip ${(
-                (avgHigher - higherPrice) *
-                100
-              ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(
-                4
-              )} (ladder ${this.repeatAddsHigherCount})`,
-            };
+            if (decision) {
+              this.avgDownOrdersPlacedHigher++;
+              return {
+                action: yesIsHigher ? "BUY_YES" : "BUY_NO",
+                tokenId: higherTokenId,
+                price: actualPrice,
+                size: addSize,
+                reason: `Raisem Avg-Down Higher: dip ${(
+                  (avgHigher - higherPrice) *
+                  100
+                ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)}`,
+              };
+            }
           }
         }
       }
 
-      // Check if we can add to lower leg (dip ≥effectiveDipThresholdRepeat)
-      if (avgLower > 0 && lowerSize > 0 && lowerPrice <= avgLower - effectiveDipThresholdRepeat) {
-        const addSize = this.computeLowerAddSizeForPair(higherSize, lowerSize);
-        if (addSize > 0) {
-          // Ladder offsets: -0.02, -0.03 for repeat adds to lower
-          const priceOffsets = [-0.02, -0.03];
-          const offset =
-            priceOffsets[this.repeatAddsLowerCount] ??
-            priceOffsets[priceOffsets.length - 1];
-          const limitPrice = Math.max(0.01, lowerPrice + offset);
-          const actualPrice =
-            this.repeatAddsLowerCount === 0 ? lowerPrice : limitPrice;
+      // Check lower leg wobble (then lower opportunities)
+      if (avgLower > 0 && lowerSize > 0) {
+        const dipThreshold = 0.025; // 2.5¢
+        if (lowerPrice <= avgLower - dipThreshold) {
+          const addSize = this.computeAvgDownSize(lowerPrice, avgLower);
+          if (addSize > 0) {
+            const priceOffsets = [-0.02, -0.05];
+            const offset =
+              priceOffsets[this.avgDownOrdersPlacedLower] ??
+              priceOffsets[priceOffsets.length - 1];
+            const limitPrice = Math.max(0.01, lowerPrice + offset);
+            const actualPrice =
+              this.avgDownOrdersPlacedLower === 0 ? lowerPrice : limitPrice;
 
-          const decision = this.simulateAdd(
-            "LOWER",
-            addSize,
-            actualPrice,
-            higherSize,
-            lowerSize,
-            effectiveAvgHigher,
-            effectiveAvgLower,
-            effectiveCurrentPairCostForRepeat,
-            0.95,
-            0.7,
-            0.75
-          );
+            const decision = this.simulateAddWithHistorical(
+              "LOWER",
+              addSize,
+              actualPrice,
+              higherSize,
+              lowerSize,
+              effectiveAvgHigher,
+              effectiveAvgLower,
+              currentPairCost,
+              currentHistoricalPair,
+              0.95,
+              0.7,
+              0.75
+            );
 
-          if (decision) {
-            this.repeatAddsLowerCount++;
-            return {
-              action: yesIsHigher ? "BUY_NO" : "BUY_YES",
-              tokenId: lowerTokenId,
-              price: actualPrice,
-              size: addSize,
-              reason: `Nuoiem Pair>0.95: lower dip ${(
-                (avgLower - lowerPrice) *
-                100
-              ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(
-                4
-              )} (ladder ${this.repeatAddsLowerCount})`,
-            };
+            if (decision) {
+              this.avgDownOrdersPlacedLower++;
+              return {
+                action: yesIsHigher ? "BUY_NO" : "BUY_YES",
+                tokenId: lowerTokenId,
+                price: actualPrice,
+                size: addSize,
+                reason: `Raisem Avg-Down Lower: dip ${(
+                  (avgLower - lowerPrice) *
+                  100
+                ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)}`,
+              };
+            }
           }
         }
       }
@@ -337,33 +305,100 @@ export class NuoiemStrategy extends TradingStrategy {
       }
     }
 
-    // 2. Avg-down higher: If dips ≥2.5¢ from avg (prioritized)
+    // 2. Avg-down higher: If dips ≥2.5¢ from avg (prioritized, recursive)
     if (avgHigher > 0 && higherSize > 0) {
-      const avgDownDecision = this.avgDownHigher(
-        higherTokenId,
-        higherPrice,
-        higherSize,
-        lowerSize,
-        avgHigher,
-        effectiveAvgHigher,
-        effectiveAvgLower,
-        currentPairCost,
-        currentMarketPairCost,
-        yesIsHigher,
-        config
-      );
-      if (avgDownDecision) {
-        return avgDownDecision;
+      const dipThreshold = 0.025; // 2.5¢
+      if (higherPrice <= avgHigher - dipThreshold) {
+        const addSize = this.computeAvgDownSize(higherPrice, avgHigher);
+        if (addSize > 0) {
+          const priceOffsets = [-0.02, -0.05];
+          const offset =
+            priceOffsets[this.avgDownOrdersPlacedHigher] ??
+            priceOffsets[priceOffsets.length - 1];
+          const limitPrice = Math.max(0.01, higherPrice + offset);
+          const actualPrice =
+            this.avgDownOrdersPlacedHigher === 0 ? higherPrice : limitPrice;
+
+          const decision = this.simulateAddWithHistorical(
+            "HIGHER",
+            addSize,
+            actualPrice,
+            higherSize,
+            lowerSize,
+            effectiveAvgHigher,
+            effectiveAvgLower,
+            currentPairCost,
+            currentHistoricalPair,
+            0.95,
+            0.7,
+            0.75
+          );
+
+          if (decision) {
+            this.avgDownOrdersPlacedHigher++;
+            return {
+              action: yesIsHigher ? "BUY_YES" : "BUY_NO",
+              tokenId: higherTokenId,
+              price: actualPrice,
+              size: addSize,
+              reason: `Raisem Avg-Down Higher: dip ${(
+                (avgHigher - higherPrice) *
+                100
+              ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)}`,
+            };
+          }
+        }
       }
     }
 
-    // 3. Hedge lower: Anytime lower <=0.52 (relaxed from 0.51)
-    // Also allow hedging if balance is off
-    const needsHedge = lowerSize < higherSize * 0.65; // If lower is less than 65% of higher
-    if (
-      (lowerPrice <= 0.52 || (lowerPrice <= 0.53 && needsHedge)) &&
-      higherSize > 0
-    ) {
+    // 3. Avg-down lower: If dips ≥2.5¢ from avg (recursive)
+    if (avgLower > 0 && lowerSize > 0) {
+      const dipThreshold = 0.025; // 2.5¢
+      if (lowerPrice <= avgLower - dipThreshold) {
+        const addSize = this.computeAvgDownSize(lowerPrice, avgLower);
+        if (addSize > 0) {
+          const priceOffsets = [-0.02, -0.05];
+          const offset =
+            priceOffsets[this.avgDownOrdersPlacedLower] ??
+            priceOffsets[priceOffsets.length - 1];
+          const limitPrice = Math.max(0.01, lowerPrice + offset);
+          const actualPrice =
+            this.avgDownOrdersPlacedLower === 0 ? lowerPrice : limitPrice;
+
+          const decision = this.simulateAddWithHistorical(
+            "LOWER",
+            addSize,
+            actualPrice,
+            higherSize,
+            lowerSize,
+            effectiveAvgHigher,
+            effectiveAvgLower,
+            currentPairCost,
+            currentHistoricalPair,
+            0.95,
+            0.7,
+            0.75
+          );
+
+          if (decision) {
+            this.avgDownOrdersPlacedLower++;
+            return {
+              action: yesIsHigher ? "BUY_NO" : "BUY_YES",
+              tokenId: lowerTokenId,
+              price: actualPrice,
+              size: addSize,
+              reason: `Raisem Avg-Down Lower: dip ${(
+                (avgLower - lowerPrice) *
+                100
+              ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)}`,
+            };
+          }
+        }
+      }
+    }
+
+    // 4. Hedge lower: Anytime lower <0.51
+    if (lowerPrice < 0.51 && higherSize > 0) {
       const hedgeDecision = this.hedgeLower(
         lowerTokenId,
         lowerPrice,
@@ -372,6 +407,7 @@ export class NuoiemStrategy extends TradingStrategy {
         effectiveAvgHigher,
         effectiveAvgLower,
         currentPairCost,
+        currentHistoricalPair,
         yesIsHigher,
         config
       );
@@ -386,10 +422,9 @@ export class NuoiemStrategy extends TradingStrategy {
   /**
    * Entry / Probe (anytime)
    * - Identify higher leg (price ≥0.52)
-   * - Buy 20–40 shares higher at ≤0.57 (increased from 10-30)
-   * - Ladder @current -0.01/-0.03
+   * - Buy 10–30 shares higher at ≤0.56
+   * - Ladder @current -0.02/-0.05
    * - Projected avg_higher < 0.60 or skip
-   * - Skip if projected pair cost > 1.00
    */
   private entryPhase(
     higherTokenId: string,
@@ -401,28 +436,27 @@ export class NuoiemStrategy extends TradingStrategy {
     currentEntryCount: number
   ): TradingDecision | null {
     const minHigherPrice = 0.52;
-    const maxHigherPrice = 0.57;
-    const probeSizeMin = 20; // Increased from 10
-    const probeSizeMax = 40; // Increased from 30
+    const maxHigherPrice = 0.56;
+    const probeSizeMin = 10;
+    const probeSizeMax = 30;
     const maxProjectedAvg = 0.6;
-    const maxProjectedPairCost = 1.00; // Skip entry if projected pair cost exceeds this
 
     if (higherPrice < minHigherPrice || higherPrice > maxHigherPrice) {
       return null;
     }
 
-    // Vary entry size between 20-40 shares (increased from 10-30)
-    // Use price proximity to max (0.57) to determine size: closer to max = smaller size
+    // Vary entry size between 10-30 shares
+    // Use price proximity to max (0.56) to determine size: closer to max = smaller size
     const priceRange = maxHigherPrice - minHigherPrice;
     const pricePosition = (higherPrice - minHigherPrice) / priceRange; // 0 to 1
     const sizeRange = probeSizeMax - probeSizeMin;
-    // Closer to max price (0.57) = smaller size, closer to min (0.52) = larger size
+    // Closer to max price (0.56) = smaller size, closer to min (0.52) = larger size
     const probeSize = Math.floor(
       probeSizeMin + sizeRange * (1 - pricePosition)
     );
 
-    // Ladder offsets: -0.01, -0.03
-    const priceOffsets = [-0.01, -0.03];
+    // Ladder offsets: -0.02, -0.05
+    const priceOffsets = [-0.02, -0.05];
     const offset =
       priceOffsets[currentEntryCount] ?? priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, higherPrice + offset);
@@ -460,105 +494,16 @@ export class NuoiemStrategy extends TradingStrategy {
     if (projectedAvg >= maxProjectedAvg) {
       return null;
     }
-    
-    // Entry validation: Check projected pair cost
-    // Estimate projected pair cost assuming we'll hedge at current lower price
-    // This is a conservative estimate to avoid entering with bad pair cost
-    const projectedPairCost = projectedAvg + lowerPrice;
-    if (projectedPairCost > maxProjectedPairCost) {
-      return null; // Skip entry if projected pair cost would be too high
-    }
 
     return {
       action: yesIsHigher ? "BUY_YES" : "BUY_NO",
       tokenId: higherTokenId,
       price: actualPrice,
       size: probeSize,
-      reason: `Nuoiem Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${
+      reason: `Raisem Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${
         currentEntryCount + 1
       }/2), probe ${probeSize} shares`,
     };
-  }
-
-  /**
-   * Avg-down higher (anytime)
-   * - If dips ≥dipThreshold from avg, add 50–150 shares
-   * - Emergency recovery: If paused and market pair cost < 0.95, allow recovery even with relaxed dip threshold
-   */
-  private avgDownHigher(
-    higherTokenId: string,
-    higherPrice: number,
-    higherSize: number,
-    lowerSize: number,
-    avgHigher: number,
-    effectiveAvgHigher: number,
-    effectiveAvgLower: number,
-    currentPairCost: number,
-    currentMarketPairCost: number,
-    yesIsHigher: boolean,
-    config: StrategyContext["config"]
-  ): TradingDecision | null {
-    const dipThreshold = 0.025; // 2.5¢ (as per strategy specification)
-    const emergencyDipThreshold = 0.015; // 1.5¢ for emergency recovery
-    const targetPairCost = 0.95;
-    const minBalanceRatio = 0.7;
-    const maxAsymRatio = 0.75;
-    
-    // Emergency recovery: If paused and market conditions improved, use relaxed threshold
-    const isEmergencyRecovery = this.isPaused && currentMarketPairCost < targetPairCost;
-    const effectiveDipThreshold = isEmergencyRecovery ? emergencyDipThreshold : dipThreshold;
-
-    // Allow avg-down if dip is >= effectiveDipThreshold from average
-    if (avgHigher > 0 && higherPrice <= avgHigher - effectiveDipThreshold) {
-      const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
-      if (addSize > 0) {
-        // Ladder offsets: -0.01, -0.02 for avg-down
-        const priceOffsets = [-0.01, -0.02];
-        const offset =
-          priceOffsets[this.avgDownOrdersPlaced] ??
-          priceOffsets[priceOffsets.length - 1];
-        const limitPrice = Math.max(0.01, higherPrice + offset);
-
-        // First order at current price, subsequent at ladder prices
-        const actualPrice =
-          this.avgDownOrdersPlaced === 0 ? higherPrice : limitPrice;
-
-        // For emergency recovery, use market pair cost for validation
-        const effectiveCurrentPairCost = isEmergencyRecovery ? currentMarketPairCost : currentPairCost;
-        
-        const decision = this.simulateAdd(
-          "HIGHER",
-          addSize,
-          actualPrice,
-          higherSize,
-          lowerSize,
-          effectiveAvgHigher,
-          effectiveAvgLower,
-          effectiveCurrentPairCost,
-          targetPairCost,
-          minBalanceRatio,
-          maxAsymRatio
-        );
-
-        if (decision) {
-          this.avgDownOrdersPlaced++;
-          return {
-            action: yesIsHigher ? "BUY_YES" : "BUY_NO",
-            tokenId: higherTokenId,
-            price: actualPrice,
-            size: addSize,
-            reason: `Nuoiem Avg-Down: higher dip ${(
-              (avgHigher - higherPrice) *
-              100
-            ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(
-              4
-            )} (ladder ${this.avgDownOrdersPlaced})`,
-          };
-        }
-      }
-    }
-
-    return null;
   }
 
   /**
@@ -574,6 +519,7 @@ export class NuoiemStrategy extends TradingStrategy {
     effectiveAvgHigher: number,
     effectiveAvgLower: number,
     currentPairCost: number,
+    currentHistoricalPair: number,
     yesIsHigher: boolean,
     config: StrategyContext["config"]
   ): TradingDecision | null {
@@ -593,7 +539,7 @@ export class NuoiemStrategy extends TradingStrategy {
       // Only place first order at current price, subsequent at ladder prices
       const actualPrice = hedgeOrdersCount === 0 ? lowerPrice : limitPrice;
 
-      const decision = this.simulateAdd(
+      const decision = this.simulateAddWithHistorical(
         "LOWER",
         addSize,
         actualPrice,
@@ -602,6 +548,7 @@ export class NuoiemStrategy extends TradingStrategy {
         effectiveAvgHigher,
         effectiveAvgLower,
         currentPairCost,
+        currentHistoricalPair,
         targetPairCost,
         minBalanceRatio,
         maxAsymRatio,
@@ -614,9 +561,7 @@ export class NuoiemStrategy extends TradingStrategy {
           tokenId: lowerTokenId,
           price: actualPrice,
           size: addSize,
-          reason: `Nuoiem Hedge: lower @ ${actualPrice.toFixed(
-            4
-          )}, add ${addSize}`,
+          reason: `Raisem Hedge: lower @ ${actualPrice.toFixed(4)}, add ${addSize}`,
         };
       }
     }
@@ -636,14 +581,12 @@ export class NuoiemStrategy extends TradingStrategy {
   ): TradingDecision | null {
     const targetPairCost = 0.95;
     const minBalanceRatio = 0.75;
-    const minAsymRatio = 0.6;
-    const maxAsymRatio = 0.75;
+    const maxAsymRatio = 0.75; // No lower bound specified in description
 
     // If fully hedged and cost profile is good, just hold to settlement
     if (
       pairCost <= targetPairCost &&
       balanceRatio >= minBalanceRatio &&
-      asymRatio >= minAsymRatio &&
       asymRatio <= maxAsymRatio
     ) {
       return {
@@ -651,7 +594,7 @@ export class NuoiemStrategy extends TradingStrategy {
         tokenId: "",
         price: 0,
         size: 0,
-        reason: `Nuoiem Lock: pair_cost=${pairCost.toFixed(
+        reason: `Raisem Lock: pair_cost=${pairCost.toFixed(
           4
         )} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
           2
@@ -665,7 +608,7 @@ export class NuoiemStrategy extends TradingStrategy {
 
   /**
    * Reversal Trigger:
-   * - If lower_price ≥ higher_price + 0.08 and balance_ratio < 0.80:
+   * - If lower_price ≥ higher_price + 0.09 and balance_ratio < 0.80:
    *   - Add 25–40% of current lower qty (rounded 10–50 shares).
    */
   private checkReversalTrigger(
@@ -684,14 +627,14 @@ export class NuoiemStrategy extends TradingStrategy {
     asymRatio: number,
     yesIsHigher: boolean,
     currentPairCost: number,
+    currentHistoricalPair: number,
     config: StrategyContext["config"]
   ): TradingDecision | null {
-    const priceDiffThreshold = 0.08;
+    const priceDiffThreshold = 0.09; // +0.09
     const balanceRatioThreshold = 0.8;
     const buyRatioMin = 0.25;
     const buyRatioMax = 0.4;
     const targetPairCost = 0.95;
-    const minQtyMultiplier = 1.02;
     const maxAsymRatio = 0.75;
 
     const priceDiff = lowerPrice - higherPrice;
@@ -707,14 +650,8 @@ export class NuoiemStrategy extends TradingStrategy {
       return null;
     }
 
-    if (this.reversalOrdersPlaced >= 3) {
-      return null;
-    }
-
-    const buyRatio = Math.min(
-      buyRatioMax,
-      buyRatioMin + this.reversalOrdersPlaced * 0.05
-    );
+    // Single add (25-40%), not multiple orders
+    const buyRatio = (buyRatioMin + buyRatioMax) / 2; // Use middle value (32.5%)
     const targetBuySize = Math.floor(lowerSize * buyRatio);
 
     const roundedSize = Math.max(
@@ -725,75 +662,51 @@ export class NuoiemStrategy extends TradingStrategy {
       return null;
     }
 
-    // Ladder offsets: -0.02, -0.03, -0.05
-    const priceOffsets = [-0.02, -0.03, -0.05];
-    const offset =
-      priceOffsets[this.reversalOrdersPlaced] ??
-      priceOffsets[priceOffsets.length - 1];
+    // Ladder offsets: -0.02, -0.05 (not -0.03)
+    const priceOffsets = [-0.02, -0.05];
+    const offset = priceOffsets[0]; // Use first offset for single order
     const limitPrice = Math.max(0.01, lowerPrice + offset);
 
-    // Simulate new lower average
-    const newLowerSize = lowerSize + roundedSize;
-    const newLowerCost =
-      effectiveAvgLower * lowerSize + limitPrice * roundedSize;
-    const newLowerAvg =
-      newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
-    const newPairCost = effectiveAvgHigher + newLowerAvg;
+    // Use simulateAddWithHistorical to check all constraints
+    const decision = this.simulateAddWithHistorical(
+      "LOWER",
+      roundedSize,
+      limitPrice,
+      higherSize,
+      lowerSize,
+      effectiveAvgHigher,
+      effectiveAvgLower,
+      currentPairCost,
+      currentHistoricalPair,
+      targetPairCost,
+      0.7, // minBalanceRatio
+      maxAsymRatio,
+      true // enforceHedgeConstraints (includes min(qty) > total_cost*1.02)
+    );
 
-    const newTotalSize = higherSize + newLowerSize;
-    const newAsymRatio =
-      newTotalSize > 0 ? Math.max(higherSize, newLowerSize) / newTotalSize : 0;
-    const newMinQty = Math.min(higherSize, newLowerSize);
-
-    // Calculate total USD cost (what we've spent)
-    const totalCostUSD =
-      effectiveAvgHigher * higherSize +
-      effectiveAvgLower * lowerSize +
-      limitPrice * roundedSize;
-    
-    // Calculate minimum USD value of the hedged position
-    // Use effective averages as proxy for current market value
-    const newHigherValueUSD = higherSize * effectiveAvgHigher;
-    const newLowerValueUSD = newLowerSize * effectiveAvgLower;
-    const minValueUSD = Math.min(newHigherValueUSD, newLowerValueUSD);
-
-    if (newPairCost > targetPairCost) {
+    if (!decision) {
       return null;
     }
-
-    // Ensure minimum side USD value is at least 1.02x the total USD cost
-    // This ensures proper hedge coverage in USD terms, not just share counts
-    if (minValueUSD <= totalCostUSD * minQtyMultiplier) {
-      return null;
-    }
-
-    if (newAsymRatio > maxAsymRatio) {
-      return null;
-    }
-
-    this.reversalOrdersPlaced++;
 
     return {
       action: yesIsHigher ? "BUY_NO" : "BUY_YES",
       tokenId: lowerTokenId,
       price: limitPrice,
       size: roundedSize,
-      reason: `Nuoiem Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(
+      reason: `Raisem Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(
         higherPrice + priceDiffThreshold
-      ).toFixed(4)}, buy ${roundedSize} @ ${limitPrice.toFixed(4)} (order ${
-        this.reversalOrdersPlaced
-      }/3)`,
+      ).toFixed(4)}, buy ${roundedSize} @ ${limitPrice.toFixed(4)}`,
     };
   }
 
-  private computeHigherAddSize(
+  private computeAvgDownSize(
     currentPrice: number,
-    avgHigher: number
+    avgPrice: number
   ): number {
     // 50–150 shares, larger when dip is larger
     const baseMin = 50;
     const baseMax = 150;
-    const dipAmount = avgHigher - currentPrice;
+    const dipAmount = avgPrice - currentPrice;
     if (dipAmount <= 0) return 0;
 
     const sizeMultiplier = Math.min(4, Math.floor(dipAmount / 0.01)); // up to 4x
@@ -813,29 +726,18 @@ export class NuoiemStrategy extends TradingStrategy {
     return Math.min(baseMax, Math.max(baseMin, needed));
   }
 
-  private computeLowerAddSizeForPair(
-    higherSize: number,
-    lowerSize: number
-  ): number {
-    // For pair >0.95 repeat check, use similar logic but can be more flexible
-    const baseMin = 50;
-    const baseMax = 150;
-    const targetLowerSize = Math.floor(higherSize * 0.7);
-    const needed = targetLowerSize - lowerSize;
-    if (needed <= 0) return Math.min(baseMax, baseMin);
-    return Math.min(baseMax, Math.max(baseMin, needed));
-  }
-
   /**
    * Simulate adding to either higher or lower leg and enforce global guards:
-   * - new_pair_cost < current_pair_cost (if current_pair_cost > 0)
-   * - new_balance_ratio ≥ minBalanceRatio
-   * - new_asym_ratio ≤ maxAsymRatio
+   * - new_historical_pair < current_historical_pair
+   * - projected_pair with add <0.95
+   * - new_balance ≥0.70
+   * - new_asym ≤0.75
+   * - pair improvement >0.01 (forces clusters)
    * - If enforceHedgeConstraints:
    *   - new_pair_cost ≤ targetPairCost
    *   - new_min(USD_value) > total_cost_USD × 1.02
    */
-  private simulateAdd(
+  private simulateAddWithHistorical(
     side: "HIGHER" | "LOWER",
     addSize: number,
     addPrice: number,
@@ -844,6 +746,7 @@ export class NuoiemStrategy extends TradingStrategy {
     effectiveAvgHigher: number,
     effectiveAvgLower: number,
     currentPairCost: number,
+    currentHistoricalPair: number,
     targetPairCost: number,
     minBalanceRatio: number,
     maxAsymRatio: number,
@@ -879,27 +782,33 @@ export class NuoiemStrategy extends TradingStrategy {
           Math.max(newHigherSize, newLowerSize)
         : 0;
 
-    // Require improving pair cost: new_pair_cost < current_pair_cost
-    // Exception: if current is already > target, allow new <= target even if >= current
-    // Also allow small tolerance (0.01) if new is still within target (≤0.95)
-    if (currentPairCost > 0) {
-      if (currentPairCost <= targetPairCost) {
-        // Current is good (≤0.95)
-        // Allow if: (1) new improves, OR (2) new is still ≤ target and within 0.01 of current
-        const tolerance = 0.01;
-        const wouldExceedTarget = newPairCost > targetPairCost;
-        const isWorseBeyondTolerance =
-          newPairCost > currentPairCost + tolerance;
+    // Projected pair cost must be <0.95
+    if (newPairCost >= targetPairCost) {
+      return false;
+    }
 
-        if (wouldExceedTarget || isWorseBeyondTolerance) {
-          return false;
-        }
-        // Allow if new ≤ target and within tolerance
-      } else {
-        // Current is bad (> target), allow new <= target even if >= current
-        if (newPairCost >= currentPairCost && newPairCost > targetPairCost) {
-          return false;
-        }
+    // Historical pair improvement: new_historical_pair < current_historical_pair
+    // Estimate new historical pair by adding new pair cost to history
+    const estimatedNewHistoricalPair =
+      currentHistoricalPair > 0
+        ? (currentHistoricalPair * this.historicalPairCosts.length +
+            newPairCost) /
+          (this.historicalPairCosts.length + 1)
+        : newPairCost;
+
+    if (
+      currentHistoricalPair > 0 &&
+      estimatedNewHistoricalPair >= currentHistoricalPair
+    ) {
+      return false;
+    }
+
+    // Pair improvement >0.01 (forces clusters)
+    // Skip this check for first hedge (when currentPairCost is 0)
+    if (currentPairCost > 0) {
+      const pairImprovement = currentPairCost - newPairCost;
+      if (pairImprovement <= 0.01) {
+        return false;
       }
     }
 
@@ -930,18 +839,14 @@ export class NuoiemStrategy extends TradingStrategy {
         effectiveAvgHigher * higherSize +
         effectiveAvgLower * lowerSize +
         addPrice * addSize;
-      
-      // Calculate minimum USD value of the hedged position (using current market prices)
-      // This represents the USD value of the smaller leg, which is our hedge protection
-      // We need to use the effective averages to estimate current value, or better yet,
-      // use the new averages after the add to see what the position will be worth
-      const newHigherValueUSD = newHigherSize * effectiveAvgHigher; // Using avg as proxy for current value
-      const newLowerValueUSD = newLowerSize * effectiveAvgLower;
-      const minValueUSD = Math.min(newHigherValueUSD, newLowerValueUSD);
 
-      // Ensure minimum side USD value is at least 1.02x the total USD cost
-      // This ensures we have proper hedge coverage in USD terms, not just share counts
-      if (minValueUSD <= totalCostUSD * 1.02) {
+      // min(qty) means min(higherSize, lowerSize) - the payout potential
+      // Each share pays $1 at settlement, so min(qty) * $1 is the minimum payout
+      const minQty = Math.min(newHigherSize, newLowerSize);
+      const minPayoutUSD = minQty * 1.0; // $1 per share at settlement
+
+      // Ensure minimum payout is at least 1.02x the total USD cost
+      if (minPayoutUSD <= totalCostUSD * 1.02) {
         return false;
       }
     }
@@ -983,15 +888,12 @@ export class NuoiemStrategy extends TradingStrategy {
     // If position grew, add new entry (successful order)
     if (higherSize > higherEntriesSize) {
       const newSize = higherSize - higherEntriesSize;
-      // Estimate price: use average of existing entries, or use current market price if available
-      // Better estimate: if we have entries, use their avg; otherwise use a conservative estimate
-      // Note: Ideally we'd have actual fill prices, but we estimate based on entry pattern
       const estimatedPrice =
         this.higherEntries.length > 0
           ? this.calculateWeightedAverage(this.higherEntries)
           : higherPosition && higherPosition.size > 0
-          ? Math.min(0.57, Math.max(0.52, higherPrice)) // Use current price bounded by entry range
-          : 0.55; // Fallback estimate
+          ? Math.min(0.56, Math.max(0.52, higherPrice)) // Use current price bounded by entry range
+          : 0.54; // Fallback estimate
       this.higherEntries.push({ price: estimatedPrice, size: newSize });
     } else if (higherSize < higherEntriesSize) {
       // Position decreased (sold/redeemed) - rebuild entries to match
@@ -1025,3 +927,4 @@ export class NuoiemStrategy extends TradingStrategy {
     }
   }
 }
+
