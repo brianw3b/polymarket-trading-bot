@@ -26,6 +26,9 @@ export interface Position {
   asset: string;
   size: number;
   side: "YES" | "NO";
+  conditionId?: string;
+  outcomeIndex?: number;
+  redeemable?: boolean;
 }
 
 /**
@@ -318,6 +321,9 @@ export async function getUserPositions(
       asset: pos.asset,
       size: parseFloat(pos.size) || 0,
       side: pos.side || "YES",
+      conditionId: pos.conditionId || pos.condition_id,
+      outcomeIndex: pos.outcomeIndex !== undefined ? pos.outcomeIndex : (pos.outcome_index !== undefined ? pos.outcome_index : undefined),
+      redeemable: pos.redeemable !== undefined ? pos.redeemable : false,
     }));
   } catch (error) {
     logger.error("Failed to fetch user positions", { userAddress, error });

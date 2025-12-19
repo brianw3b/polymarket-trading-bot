@@ -1,6 +1,6 @@
 import { loadConfig } from "./config";
 import { createLogger } from "./utils/logger";
-import { initializeWallet, initializeClobClient } from "./utils/wallet";
+import { initializeWallet, initializeClobClient, WalletSetup } from "./utils/wallet";
 import {
   getMarketByToken,
   getMarketBySlug,
@@ -15,6 +15,7 @@ import {
 import { getStrategy } from "./strategies";
 import { OrderExecutor } from "./execution/orderExecutor";
 import { StrategyContext } from "./strategies/base";
+import { redeemPositions } from "./utils/redeem";
 
 class PolymarketTradingBot {
   private config = loadConfig();
@@ -24,6 +25,8 @@ class PolymarketTradingBot {
   private strategy: any = null;
   private isRunning = false;
   private intervalId: NodeJS.Timeout | null = null;
+  private relayClient: any = null;
+  private lastRedeemCheck: Map<string, number> = new Map(); // Track last redeem attempt per conditionId
 
   async initialize() {
     try {
@@ -81,6 +84,8 @@ class PolymarketTradingBot {
       const { wallet, address, safeAddress, relayClient } =
         await initializeWallet(this.config, this.logger);
 
+      this.relayClient = relayClient;
+
       this.clobClient = await initializeClobClient(
         this.config,
         wallet,
@@ -112,13 +117,65 @@ class PolymarketTradingBot {
           this.config.targetMarketSlug,
           this.logger
         );
-        if (!market) {
-          throw new Error(
-            `Market not found for slug: ${this.config.targetMarketSlug}`
-          );
+        
+        // If market not found and using pattern, try next interval (like in executeTradingCycle)
+        if (!market && this.config.marketSlugPattern) {
+          const timePattern =
+            this.config.marketSlugPattern.timePattern === "static"
+              ? "hourly"
+              : this.config.marketSlugPattern.timePattern === "15min"
+              ? "15min"
+              : this.config.marketSlugPattern.timePattern === "daily"
+              ? "daily"
+              : "hourly";
+          const pattern: MarketSlugPattern = {
+            baseSlug: this.config.marketSlugPattern.baseSlug,
+            timePattern: timePattern as "hourly" | "daily" | "15min" | "custom",
+          };
+          let nextSlug: string;
+          let nextTime: Date;
+
+          if (this.config.marketSlugPattern.timePattern === "15min") {
+            nextTime = new Date(Date.now() + 15 * 60 * 1000);
+            nextSlug = generateMarketSlug(pattern, nextTime, this.logger);
+            this.logger.info(
+              `Market not found for ${this.config.targetMarketSlug}, trying next 15min: ${nextSlug}`
+            );
+          } else if (this.config.marketSlugPattern.timePattern === "hourly") {
+            nextTime = new Date(Date.now() + 60 * 60 * 1000);
+            nextSlug = generateMarketSlug(pattern, nextTime, this.logger);
+            this.logger.info(
+              `Market not found for ${this.config.targetMarketSlug}, trying next hour: ${nextSlug}`
+            );
+          } else {
+            nextSlug = this.config.targetMarketSlug;
+          }
+
+          if (nextSlug !== this.config.targetMarketSlug) {
+            market = await getMarketBySlug(nextSlug, this.logger);
+            if (market) {
+              this.config.targetMarketSlug = nextSlug;
+              this.logger.info(`Found market at next interval: ${nextSlug}`);
+            }
+          }
         }
-        if (market.tokenIds && market.tokenIds.length > 0) {
-          this.config.targetTokenId = market.tokenIds[0];
+        
+        if (!market) {
+          // For pattern-based markets, allow initialization to continue
+          // The execution cycle will handle finding the market
+          if (this.config.marketSlugPattern) {
+            this.logger.warn(
+              `Market not found for slug: ${this.config.targetMarketSlug}, but continuing initialization. Execution cycle will retry.`
+            );
+          } else {
+            throw new Error(
+              `Market not found for slug: ${this.config.targetMarketSlug}`
+            );
+          }
+        } else {
+          if (market.tokenIds && market.tokenIds.length > 0) {
+            this.config.targetTokenId = market.tokenIds[0];
+          }
         }
       } else if (this.config.targetTokenId) {
         this.logger.info("Fetching market by token ID...");
@@ -151,13 +208,14 @@ class PolymarketTradingBot {
         }
       }
 
-      if (!market) {
+      if (market) {
+        this.logger.info(`Market found: ${market.question}`);
+        this.logger.info(`Outcomes: ${market.outcomes.join(", ")}`);
+        this.logger.info(`Token IDs: ${market.tokenIds.join(", ")}`);
+      } else if (!this.config.marketSlugPattern) {
+        // Only throw error if not using pattern (pattern markets will be found in execution cycle)
         throw new Error("Failed to fetch market information");
       }
-
-      this.logger.info(`Market found: ${market.question}`);
-      this.logger.info(`Outcomes: ${market.outcomes.join(", ")}`);
-      this.logger.info(`Token IDs: ${market.tokenIds.join(", ")}`);
 
       this.logger.info("Bot initialized successfully");
     } catch (error) {
@@ -316,6 +374,11 @@ class PolymarketTradingBot {
 
       this.logger.info(`Current positions: ${positions.length}`);
 
+      // Check if market is closed and redeem winning positions
+      if (market.closed) {
+        await this.handleMarketRedemption(market, positions, yesTokenId, noTokenId, yesPrice, noPrice);
+      }
+
       let timeUntilEnd: number | undefined;
       if (this.config.marketSlugPattern?.timePattern === "15min") {
         const now = Date.now();
@@ -427,6 +490,127 @@ class PolymarketTradingBot {
     }
 
     this.logger.info("Bot stopped");
+  }
+
+  /**
+   * Handle redemption of winning positions when market is closed
+   */
+  private async handleMarketRedemption(
+    market: any,
+    positions: any[],
+    yesTokenId: string,
+    noTokenId: string,
+    yesPrice: any,
+    noPrice: any
+  ): Promise<void> {
+    if (!this.relayClient) {
+      this.logger.warn("Relay client not available, cannot redeem positions");
+      return;
+    }
+
+    try {
+      // Determine winning outcome: YES wins if YES price = 1.0, NO wins if NO price = 1.0
+      // In practice, when market closes, winning side price approaches 1.0
+      const yesWins = yesPrice.midPrice >= 0.99;
+      const noWins = noPrice.midPrice >= 0.99;
+
+      if (!yesWins && !noWins) {
+        this.logger.info("Market closed but outcome not yet determined", {
+          yesPrice: yesPrice.midPrice,
+          noPrice: noPrice.midPrice,
+        });
+        return;
+      }
+
+      const winningOutcome = yesWins ? "YES" : "NO";
+      const winningTokenId = yesWins ? yesTokenId : noTokenId;
+      const outcomeIndex = yesWins ? 0 : 1; // YES = 0, NO = 1
+
+      this.logger.info("Market closed, determining winning outcome", {
+        winningOutcome,
+        yesPrice: yesPrice.midPrice,
+        noPrice: noPrice.midPrice,
+        outcomeIndex,
+      });
+
+      // Find positions for winning outcome
+      const winningPositions = positions.filter(
+        (pos) => pos.asset === winningTokenId && pos.size > 0
+      );
+
+      if (winningPositions.length === 0) {
+        this.logger.info("No winning positions to redeem");
+        return;
+      }
+
+      // Group positions by conditionId
+      const positionsByCondition = new Map<string, any[]>();
+      for (const pos of winningPositions) {
+        if (pos.conditionId) {
+          if (!positionsByCondition.has(pos.conditionId)) {
+            positionsByCondition.set(pos.conditionId, []);
+          }
+          positionsByCondition.get(pos.conditionId)!.push(pos);
+        }
+      }
+
+      // Redeem positions for each conditionId
+      for (const [conditionId, conditionPositions] of positionsByCondition) {
+        const totalSize = conditionPositions.reduce((sum, p) => sum + p.size, 0);
+        
+        // Check if we already tried to redeem this condition recently (within 5 minutes)
+        const lastRedeemAttempt = this.lastRedeemCheck.get(conditionId) || 0;
+        const now = Date.now();
+        if (now - lastRedeemAttempt < 5 * 60 * 1000) {
+          this.logger.debug("Skipping redeem - attempted recently", {
+            conditionId,
+            lastAttempt: new Date(lastRedeemAttempt).toISOString(),
+          });
+          continue;
+        }
+
+        this.logger.info("Redeeming winning positions", {
+          conditionId,
+          outcomeIndex,
+          winningOutcome,
+          totalSize,
+          positionsCount: conditionPositions.length,
+        });
+
+        try {
+          // Use outcomeIndex from position if available, otherwise use determined index
+          const posOutcomeIndex = conditionPositions[0]?.outcomeIndex ?? outcomeIndex;
+          
+          await redeemPositions(
+            this.relayClient,
+            {
+              conditionId,
+              outcomeIndex: posOutcomeIndex,
+            },
+            this.logger
+          );
+
+          this.lastRedeemCheck.set(conditionId, now);
+          this.logger.info("Successfully redeemed positions", {
+            conditionId,
+            outcomeIndex: posOutcomeIndex,
+            totalSize,
+          });
+        } catch (error) {
+          this.logger.error("Failed to redeem positions", {
+            conditionId,
+            outcomeIndex,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          // Still update last attempt to avoid spamming
+          this.lastRedeemCheck.set(conditionId, now);
+        }
+      }
+    } catch (error) {
+      this.logger.error("Error handling market redemption", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   async shutdown() {

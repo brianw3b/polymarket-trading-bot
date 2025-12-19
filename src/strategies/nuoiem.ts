@@ -5,9 +5,9 @@ import { TokenPrice, Position } from "../utils/marketData";
  * Nuoiem Strategy
  *
  * Entry:
- * - Identify higher leg (price ≥0.52): limit buy 10-30 shares higher at ≤0.57 (small probe). 
+ * - Identify higher leg (price ≥0.52): limit buy 10-30 shares higher at ≤0.57 (small probe).
  *   (ladder @current -0.01/-0.03). projected avg_higher <0.60 or skip.
- * - Hedge lower: anytime lower <0.51 and sim new_pair ≤0.95 and new_min(qty) > total_cost*1.02 
+ * - Hedge lower: anytime lower <0.51 and sim new_pair ≤0.95 and new_min(qty) > total_cost*1.02
  *   (ladder 70-140 shares @current-0.02/-0.05; match ~70% higher qty).
  * - Avg-down higher leg: If dips ≥2.5¢ from avg, add 50-150 shares ladder.
  * - Repeat check every 5s if pair >0.95, add more to both legs (dip ≥2.5¢ below leg avg) to lower the pair_cost.
@@ -26,7 +26,8 @@ import { TokenPrice, Position } from "../utils/marketData";
  */
 export class NuoiemStrategy extends TradingStrategy {
   name = "nuoiem";
-  description = "Nuoiem strategy with entry, hedge, avg-down, reversal trigger, and lock/exit conditions";
+  description =
+    "Nuoiem strategy with entry, hedge, avg-down, reversal trigger, and lock/exit conditions";
 
   // Track entry prices with sizes for weighted averages (only successful orders)
   private higherEntries: Array<{ price: number; size: number }> = [];
@@ -54,19 +55,27 @@ export class NuoiemStrategy extends TradingStrategy {
   }
 
   execute(context: StrategyContext): TradingDecision | null {
-    const { yesTokenPrice, noTokenPrice, positions, config, timeUntilEnd } = context;
+    const { yesTokenPrice, noTokenPrice, positions, config, timeUntilEnd } =
+      context;
 
     if (!yesTokenPrice || !noTokenPrice) {
       return null;
     }
 
-
     // Determine which leg is higher
     const yesIsHigher = yesTokenPrice.askPrice >= noTokenPrice.askPrice;
-    const higherPrice = yesIsHigher ? yesTokenPrice.askPrice : noTokenPrice.askPrice;
-    const lowerPrice = yesIsHigher ? noTokenPrice.askPrice : yesTokenPrice.askPrice;
-    const higherTokenId = yesIsHigher ? yesTokenPrice.tokenId : noTokenPrice.tokenId;
-    const lowerTokenId = yesIsHigher ? noTokenPrice.tokenId : yesTokenPrice.tokenId;
+    const higherPrice = yesIsHigher
+      ? yesTokenPrice.askPrice
+      : noTokenPrice.askPrice;
+    const lowerPrice = yesIsHigher
+      ? noTokenPrice.askPrice
+      : yesTokenPrice.askPrice;
+    const higherTokenId = yesIsHigher
+      ? yesTokenPrice.tokenId
+      : noTokenPrice.tokenId;
+    const lowerTokenId = yesIsHigher
+      ? noTokenPrice.tokenId
+      : yesTokenPrice.tokenId;
 
     // Initialize higher leg tracking
     if (this.higherLeg === null && higherPrice >= 0.52) {
@@ -80,7 +89,14 @@ export class NuoiemStrategy extends TradingStrategy {
     const lowerSize = lowerPosition?.size || 0;
 
     // Sync entries with actual positions (only track successful orders)
-    this.syncEntriesWithPositions(higherSize, lowerSize, higherPosition, lowerPosition, higherPrice, lowerPrice);
+    this.syncEntriesWithPositions(
+      higherSize,
+      lowerSize,
+      higherPosition,
+      lowerPosition,
+      higherPrice,
+      lowerPrice
+    );
 
     // Weighted averages from entries
     const avgHigher = this.calculateWeightedAverage(this.higherEntries);
@@ -93,7 +109,8 @@ export class NuoiemStrategy extends TradingStrategy {
     // Metrics
     const pairCost = effectiveAvgHigher + effectiveAvgLower;
     const totalSize = higherSize + lowerSize;
-    const asymRatio = totalSize > 0 ? Math.max(higherSize, lowerSize) / totalSize : 0;
+    const asymRatio =
+      totalSize > 0 ? Math.max(higherSize, lowerSize) / totalSize : 0;
     const balanceRatio =
       totalSize > 0 && Math.max(higherSize, lowerSize) > 0
         ? Math.min(higherSize, lowerSize) / Math.max(higherSize, lowerSize)
@@ -185,17 +202,21 @@ export class NuoiemStrategy extends TradingStrategy {
     const now = Date.now();
     if (currentPairCost > 0.95 && now - this.lastPairCheck >= 5000) {
       this.lastPairCheck = now;
-      
-      // Check if we can add to higher leg (dip ≥1.5¢)
-      if (avgHigher > 0 && higherSize > 0 && higherPrice <= avgHigher - 0.015) {
+      const dipThresholdRepeat = 0.025; // 2.5¢ - as per strategy specification
+
+      // Check if we can add to higher leg (dip ≥2.5¢)
+      if (avgHigher > 0 && higherSize > 0 && higherPrice <= avgHigher - dipThresholdRepeat) {
         const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
         if (addSize > 0) {
           // Ladder offsets: -0.01, -0.02 for repeat adds
           const priceOffsets = [-0.01, -0.02];
-          const offset = priceOffsets[this.repeatAddsHigherCount] ?? priceOffsets[priceOffsets.length - 1];
+          const offset =
+            priceOffsets[this.repeatAddsHigherCount] ??
+            priceOffsets[priceOffsets.length - 1];
           const limitPrice = Math.max(0.01, higherPrice + offset);
-          const actualPrice = this.repeatAddsHigherCount === 0 ? higherPrice : limitPrice;
-          
+          const actualPrice =
+            this.repeatAddsHigherCount === 0 ? higherPrice : limitPrice;
+
           const decision = this.simulateAdd(
             "HIGHER",
             addSize,
@@ -206,7 +227,7 @@ export class NuoiemStrategy extends TradingStrategy {
             effectiveAvgLower,
             currentPairCost,
             0.95,
-            0.70,
+            0.7,
             0.75
           );
 
@@ -217,22 +238,30 @@ export class NuoiemStrategy extends TradingStrategy {
               tokenId: higherTokenId,
               price: actualPrice,
               size: addSize,
-              reason: `Nuoiem Pair>0.95: higher dip ${((avgHigher - higherPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)} (ladder ${this.repeatAddsHigherCount})`,
+              reason: `Nuoiem Pair>0.95: higher dip ${(
+                (avgHigher - higherPrice) *
+                100
+              ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(
+                4
+              )} (ladder ${this.repeatAddsHigherCount})`,
             };
           }
         }
       }
 
-      // Check if we can add to lower leg (dip ≥1.5¢)
-      if (avgLower > 0 && lowerSize > 0 && lowerPrice <= avgLower - 0.015) {
+      // Check if we can add to lower leg (dip ≥2.5¢)
+      if (avgLower > 0 && lowerSize > 0 && lowerPrice <= avgLower - dipThresholdRepeat) {
         const addSize = this.computeLowerAddSizeForPair(higherSize, lowerSize);
         if (addSize > 0) {
           // Ladder offsets: -0.02, -0.03 for repeat adds to lower
           const priceOffsets = [-0.02, -0.03];
-          const offset = priceOffsets[this.repeatAddsLowerCount] ?? priceOffsets[priceOffsets.length - 1];
+          const offset =
+            priceOffsets[this.repeatAddsLowerCount] ??
+            priceOffsets[priceOffsets.length - 1];
           const limitPrice = Math.max(0.01, lowerPrice + offset);
-          const actualPrice = this.repeatAddsLowerCount === 0 ? lowerPrice : limitPrice;
-          
+          const actualPrice =
+            this.repeatAddsLowerCount === 0 ? lowerPrice : limitPrice;
+
           const decision = this.simulateAdd(
             "LOWER",
             addSize,
@@ -243,7 +272,7 @@ export class NuoiemStrategy extends TradingStrategy {
             effectiveAvgLower,
             currentPairCost,
             0.95,
-            0.70,
+            0.7,
             0.75
           );
 
@@ -254,7 +283,12 @@ export class NuoiemStrategy extends TradingStrategy {
               tokenId: lowerTokenId,
               price: actualPrice,
               size: addSize,
-              reason: `Nuoiem Pair>0.95: lower dip ${((avgLower - lowerPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)} (ladder ${this.repeatAddsLowerCount})`,
+              reason: `Nuoiem Pair>0.95: lower dip ${(
+                (avgLower - lowerPrice) *
+                100
+              ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(
+                4
+              )} (ladder ${this.repeatAddsLowerCount})`,
             };
           }
         }
@@ -280,34 +314,32 @@ export class NuoiemStrategy extends TradingStrategy {
       }
     }
 
-    // 2. Avg-down higher: If dips ≥1.5¢ from avg (prioritized)
-    // Also allow if price is below average (even small dips) to build position
+    // 2. Avg-down higher: If dips ≥2.5¢ from avg (prioritized)
     if (avgHigher > 0 && higherSize > 0) {
-      // Allow avg-down on any dip, but prioritize larger dips
-      const hasDip = higherPrice < avgHigher;
-      if (hasDip) {
-        const avgDownDecision = this.avgDownHigher(
-          higherTokenId,
-          higherPrice,
-          higherSize,
-          lowerSize,
-          avgHigher,
-          effectiveAvgHigher,
-          effectiveAvgLower,
-          currentPairCost,
-          yesIsHigher,
-          config
-        );
-        if (avgDownDecision) {
-          return avgDownDecision;
-        }
+      const avgDownDecision = this.avgDownHigher(
+        higherTokenId,
+        higherPrice,
+        higherSize,
+        lowerSize,
+        avgHigher,
+        effectiveAvgHigher,
+        effectiveAvgLower,
+        currentPairCost,
+        yesIsHigher,
+        config
+      );
+      if (avgDownDecision) {
+        return avgDownDecision;
       }
     }
 
     // 3. Hedge lower: Anytime lower <0.51, or if balance is off and lower is attractive
     // Also allow hedging if lower is <0.52 and we need to balance
     const needsHedge = lowerSize < higherSize * 0.65; // If lower is less than 65% of higher
-    if ((lowerPrice < 0.51 || (lowerPrice < 0.52 && needsHedge)) && higherSize > 0) {
+    if (
+      (lowerPrice < 0.51 || (lowerPrice < 0.52 && needsHedge)) &&
+      higherSize > 0
+    ) {
       const hedgeDecision = this.hedgeLower(
         lowerTokenId,
         lowerPrice,
@@ -359,16 +391,19 @@ export class NuoiemStrategy extends TradingStrategy {
     const pricePosition = (higherPrice - minHigherPrice) / priceRange; // 0 to 1
     const sizeRange = probeSizeMax - probeSizeMin;
     // Closer to max price (0.57) = smaller size, closer to min (0.52) = larger size
-    const probeSize = Math.floor(probeSizeMin + sizeRange * (1 - pricePosition));
-    
+    const probeSize = Math.floor(
+      probeSizeMin + sizeRange * (1 - pricePosition)
+    );
+
     // Ladder offsets: -0.01, -0.03
     const priceOffsets = [-0.01, -0.03];
-    const offset = priceOffsets[currentEntryCount] ?? priceOffsets[priceOffsets.length - 1];
+    const offset =
+      priceOffsets[currentEntryCount] ?? priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, higherPrice + offset);
 
     // Only place first order at current price, subsequent at ladder prices
     const actualPrice = currentEntryCount === 0 ? higherPrice : limitPrice;
-    
+
     // Calculate projected average after all ladder orders (2 orders total)
     let projectedAvg: number;
     if (currentEntryCount === 0) {
@@ -376,18 +411,26 @@ export class NuoiemStrategy extends TradingStrategy {
       const totalPlannedSize = probeSize * 2;
       const firstOrderPrice = higherPrice;
       const secondOrderPrice = Math.max(0.01, higherPrice + priceOffsets[1]);
-      const projectedTotalCost = firstOrderPrice * probeSize + secondOrderPrice * probeSize;
-      projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+      const projectedTotalCost =
+        firstOrderPrice * probeSize + secondOrderPrice * probeSize;
+      projectedAvg =
+        totalPlannedSize > 0
+          ? projectedTotalCost / totalPlannedSize
+          : higherPrice;
     } else {
       // Second order: use actual first order from entries
       const firstEntry = this.higherEntries[0];
       const firstOrderPrice = firstEntry.price;
       const secondOrderPrice = limitPrice;
       const totalPlannedSize = firstEntry.size + probeSize;
-      const projectedTotalCost = firstOrderPrice * firstEntry.size + secondOrderPrice * probeSize;
-      projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+      const projectedTotalCost =
+        firstOrderPrice * firstEntry.size + secondOrderPrice * probeSize;
+      projectedAvg =
+        totalPlannedSize > 0
+          ? projectedTotalCost / totalPlannedSize
+          : higherPrice;
     }
-    
+
     if (projectedAvg >= maxProjectedAvg) {
       return null;
     }
@@ -397,13 +440,15 @@ export class NuoiemStrategy extends TradingStrategy {
       tokenId: higherTokenId,
       price: actualPrice,
       size: probeSize,
-      reason: `Nuoiem Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${currentEntryCount + 1}/2), probe ${probeSize} shares`,
+      reason: `Nuoiem Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${
+        currentEntryCount + 1
+      }/2), probe ${probeSize} shares`,
     };
   }
 
   /**
    * Avg-down higher (anytime)
-   * - If dips ≥2.5¢ from avg, add 50–150 shares
+   * - If dips ≥dipThreshold from avg, add 50–150 shares
    */
   private avgDownHigher(
     higherTokenId: string,
@@ -417,26 +462,26 @@ export class NuoiemStrategy extends TradingStrategy {
     yesIsHigher: boolean,
     config: StrategyContext["config"]
   ): TradingDecision | null {
-    const dipThreshold = 0.015; // 1.5¢ (reduced from 2.5¢ to allow more avg-down opportunities)
+    const dipThreshold = 0.025; // 2.5¢ (as per strategy specification)
     const targetPairCost = 0.95;
-    const minBalanceRatio = 0.70;
+    const minBalanceRatio = 0.7;
     const maxAsymRatio = 0.75;
 
-    // Allow avg-down on any dip below average, but size based on dip amount
-    if (avgHigher > 0 && higherPrice < avgHigher) {
-      const actualDip = avgHigher - higherPrice;
-      // Only proceed if dip is meaningful (≥0.01) or if we need to balance
-      if (actualDip >= 0.01 || (higherSize > 0 && lowerSize > 0 && currentPairCost > 0.93)) {
-        const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
+    // Allow avg-down if dip is >= dipThreshold from average
+    if (avgHigher > 0 && higherPrice <= avgHigher - dipThreshold) {
+      const addSize = this.computeHigherAddSize(higherPrice, avgHigher);
       if (addSize > 0) {
         // Ladder offsets: -0.01, -0.02 for avg-down
         const priceOffsets = [-0.01, -0.02];
-        const offset = priceOffsets[this.avgDownOrdersPlaced] ?? priceOffsets[priceOffsets.length - 1];
+        const offset =
+          priceOffsets[this.avgDownOrdersPlaced] ??
+          priceOffsets[priceOffsets.length - 1];
         const limitPrice = Math.max(0.01, higherPrice + offset);
-        
+
         // First order at current price, subsequent at ladder prices
-        const actualPrice = this.avgDownOrdersPlaced === 0 ? higherPrice : limitPrice;
-        
+        const actualPrice =
+          this.avgDownOrdersPlaced === 0 ? higherPrice : limitPrice;
+
         const decision = this.simulateAdd(
           "HIGHER",
           addSize,
@@ -458,10 +503,14 @@ export class NuoiemStrategy extends TradingStrategy {
             tokenId: higherTokenId,
             price: actualPrice,
             size: addSize,
-            reason: `Nuoiem Avg-Down: higher dip ${((avgHigher - higherPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(4)} (ladder ${this.avgDownOrdersPlaced})`,
+            reason: `Nuoiem Avg-Down: higher dip ${(
+              (avgHigher - higherPrice) *
+              100
+            ).toFixed(2)}¢, add ${addSize} @ ${actualPrice.toFixed(
+              4
+            )} (ladder ${this.avgDownOrdersPlaced})`,
           };
         }
-      }
       }
     }
 
@@ -485,7 +534,7 @@ export class NuoiemStrategy extends TradingStrategy {
     config: StrategyContext["config"]
   ): TradingDecision | null {
     const targetPairCost = 0.95;
-    const minBalanceRatio = 0.70;
+    const minBalanceRatio = 0.7;
     const maxAsymRatio = 0.75;
 
     const addSize = this.computeLowerAddSize(higherSize, lowerSize);
@@ -493,7 +542,8 @@ export class NuoiemStrategy extends TradingStrategy {
       // Ladder offsets: -0.02, -0.05
       const priceOffsets = [-0.02, -0.05];
       const hedgeOrdersCount = this.lowerEntries.length;
-      const offset = priceOffsets[hedgeOrdersCount] ?? priceOffsets[priceOffsets.length - 1];
+      const offset =
+        priceOffsets[hedgeOrdersCount] ?? priceOffsets[priceOffsets.length - 1];
       const limitPrice = Math.max(0.01, lowerPrice + offset);
 
       // Only place first order at current price, subsequent at ladder prices
@@ -520,7 +570,9 @@ export class NuoiemStrategy extends TradingStrategy {
           tokenId: lowerTokenId,
           price: actualPrice,
           size: addSize,
-          reason: `Nuoiem Hedge: lower @ ${actualPrice.toFixed(4)}, add ${addSize}`,
+          reason: `Nuoiem Hedge: lower @ ${actualPrice.toFixed(
+            4
+          )}, add ${addSize}`,
         };
       }
     }
@@ -540,7 +592,7 @@ export class NuoiemStrategy extends TradingStrategy {
   ): TradingDecision | null {
     const targetPairCost = 0.95;
     const minBalanceRatio = 0.75;
-    const minAsymRatio = 0.60;
+    const minAsymRatio = 0.6;
     const maxAsymRatio = 0.75;
 
     // If fully hedged and cost profile is good, just hold to settlement
@@ -555,7 +607,9 @@ export class NuoiemStrategy extends TradingStrategy {
         tokenId: "",
         price: 0,
         size: 0,
-        reason: `Nuoiem Lock: pair_cost=${pairCost.toFixed(4)} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
+        reason: `Nuoiem Lock: pair_cost=${pairCost.toFixed(
+          4
+        )} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
           2
         )}, asym=${asymRatio.toFixed(2)}`,
       };
@@ -589,7 +643,7 @@ export class NuoiemStrategy extends TradingStrategy {
     config: StrategyContext["config"]
   ): TradingDecision | null {
     const priceDiffThreshold = 0.08;
-    const balanceRatioThreshold = 0.80;
+    const balanceRatioThreshold = 0.8;
     const buyRatioMin = 0.25;
     const buyRatioMax = 0.4;
     const targetPairCost = 0.95;
@@ -613,31 +667,45 @@ export class NuoiemStrategy extends TradingStrategy {
       return null;
     }
 
-    const buyRatio = Math.min(buyRatioMax, buyRatioMin + this.reversalOrdersPlaced * 0.05);
+    const buyRatio = Math.min(
+      buyRatioMax,
+      buyRatioMin + this.reversalOrdersPlaced * 0.05
+    );
     const targetBuySize = Math.floor(lowerSize * buyRatio);
 
-    const roundedSize = Math.max(10, Math.min(50, Math.round(targetBuySize / 10) * 10));
+    const roundedSize = Math.max(
+      10,
+      Math.min(50, Math.round(targetBuySize / 10) * 10)
+    );
     if (roundedSize <= 0) {
       return null;
     }
 
     // Ladder offsets: -0.02, -0.03, -0.05
     const priceOffsets = [-0.02, -0.03, -0.05];
-    const offset = priceOffsets[this.reversalOrdersPlaced] ?? priceOffsets[priceOffsets.length - 1];
+    const offset =
+      priceOffsets[this.reversalOrdersPlaced] ??
+      priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, lowerPrice + offset);
 
     // Simulate new lower average
     const newLowerSize = lowerSize + roundedSize;
-    const newLowerCost = effectiveAvgLower * lowerSize + limitPrice * roundedSize;
-    const newLowerAvg = newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
+    const newLowerCost =
+      effectiveAvgLower * lowerSize + limitPrice * roundedSize;
+    const newLowerAvg =
+      newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
     const newPairCost = effectiveAvgHigher + newLowerAvg;
 
     const newTotalSize = higherSize + newLowerSize;
-    const newAsymRatio = newTotalSize > 0 ? Math.max(higherSize, newLowerSize) / newTotalSize : 0;
+    const newAsymRatio =
+      newTotalSize > 0 ? Math.max(higherSize, newLowerSize) / newTotalSize : 0;
     const newMinQty = Math.min(higherSize, newLowerSize);
 
     // Calculate total USD cost
-    const totalCost = effectiveAvgHigher * higherSize + effectiveAvgLower * lowerSize + limitPrice * roundedSize;
+    const totalCost =
+      effectiveAvgHigher * higherSize +
+      effectiveAvgLower * lowerSize +
+      limitPrice * roundedSize;
     // Convert total cost to equivalent pair shares: total_cost / pair_cost
     const equivalentPairShares = newPairCost > 0 ? totalCost / newPairCost : 0;
 
@@ -661,13 +729,18 @@ export class NuoiemStrategy extends TradingStrategy {
       tokenId: lowerTokenId,
       price: limitPrice,
       size: roundedSize,
-      reason: `Nuoiem Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(higherPrice + priceDiffThreshold).toFixed(
-        4
-      )}, buy ${roundedSize} @ ${limitPrice.toFixed(4)} (order ${this.reversalOrdersPlaced}/3)`,
+      reason: `Nuoiem Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(
+        higherPrice + priceDiffThreshold
+      ).toFixed(4)}, buy ${roundedSize} @ ${limitPrice.toFixed(4)} (order ${
+        this.reversalOrdersPlaced
+      }/3)`,
     };
   }
 
-  private computeHigherAddSize(currentPrice: number, avgHigher: number): number {
+  private computeHigherAddSize(
+    currentPrice: number,
+    avgHigher: number
+  ): number {
     // 50–150 shares, larger when dip is larger
     const baseMin = 50;
     const baseMax = 150;
@@ -691,7 +764,10 @@ export class NuoiemStrategy extends TradingStrategy {
     return Math.min(baseMax, Math.max(baseMin, needed));
   }
 
-  private computeLowerAddSizeForPair(higherSize: number, lowerSize: number): number {
+  private computeLowerAddSizeForPair(
+    higherSize: number,
+    lowerSize: number
+  ): number {
     // For pair >0.95 repeat check, use similar logic but can be more flexible
     const baseMin = 50;
     const baseMax = 150;
@@ -731,21 +807,27 @@ export class NuoiemStrategy extends TradingStrategy {
 
     if (side === "HIGHER") {
       newHigherSize = higherSize + addSize;
-      const newHigherCost = effectiveAvgHigher * higherSize + addPrice * addSize;
-      newHigherAvg = newHigherSize > 0 ? newHigherCost / newHigherSize : effectiveAvgHigher;
+      const newHigherCost =
+        effectiveAvgHigher * higherSize + addPrice * addSize;
+      newHigherAvg =
+        newHigherSize > 0 ? newHigherCost / newHigherSize : effectiveAvgHigher;
     } else {
       newLowerSize = lowerSize + addSize;
       const newLowerCost = effectiveAvgLower * lowerSize + addPrice * addSize;
-      newLowerAvg = newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
+      newLowerAvg =
+        newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
     }
 
     const newPairCost = newHigherAvg + newLowerAvg;
     const newTotalSize = newHigherSize + newLowerSize;
     const newAsymRatio =
-      newTotalSize > 0 ? Math.max(newHigherSize, newLowerSize) / newTotalSize : 0;
+      newTotalSize > 0
+        ? Math.max(newHigherSize, newLowerSize) / newTotalSize
+        : 0;
     const newBalanceRatio =
       newTotalSize > 0 && Math.max(newHigherSize, newLowerSize) > 0
-        ? Math.min(newHigherSize, newLowerSize) / Math.max(newHigherSize, newLowerSize)
+        ? Math.min(newHigherSize, newLowerSize) /
+          Math.max(newHigherSize, newLowerSize)
         : 0;
 
     // Require improving pair cost: new_pair_cost < current_pair_cost
@@ -757,8 +839,9 @@ export class NuoiemStrategy extends TradingStrategy {
         // Allow if: (1) new improves, OR (2) new is still ≤ target and within 0.01 of current
         const tolerance = 0.01;
         const wouldExceedTarget = newPairCost > targetPairCost;
-        const isWorseBeyondTolerance = newPairCost > currentPairCost + tolerance;
-        
+        const isWorseBeyondTolerance =
+          newPairCost > currentPairCost + tolerance;
+
         if (wouldExceedTarget || isWorseBeyondTolerance) {
           return false;
         }
@@ -772,14 +855,19 @@ export class NuoiemStrategy extends TradingStrategy {
     }
 
     // Balance ratio check: allow first hedge (when lowerSize === 0) with relaxed threshold
-    const isFirstHedge = (side === "LOWER" && lowerSize === 0) || (side === "HIGHER" && higherSize === 0);
+    const isFirstHedge =
+      (side === "LOWER" && lowerSize === 0) ||
+      (side === "HIGHER" && higherSize === 0);
     if (!isFirstHedge && newBalanceRatio < minBalanceRatio) {
       return false;
     }
 
     // Enforce asym ratio range: 0.60-0.75
-    const minAsymRatio = 0.60;
-    if (newAsymRatio > maxAsymRatio || (newTotalSize > 0 && newAsymRatio < minAsymRatio)) {
+    const minAsymRatio = 0.6;
+    if (
+      newAsymRatio > maxAsymRatio ||
+      (newTotalSize > 0 && newAsymRatio < minAsymRatio)
+    ) {
       return false;
     }
 
@@ -790,10 +878,14 @@ export class NuoiemStrategy extends TradingStrategy {
 
       const newMinQty = Math.min(newHigherSize, newLowerSize);
       // Calculate total USD cost
-      const totalCost = effectiveAvgHigher * higherSize + effectiveAvgLower * lowerSize + addPrice * addSize;
+      const totalCost =
+        effectiveAvgHigher * higherSize +
+        effectiveAvgLower * lowerSize +
+        addPrice * addSize;
       // Convert total cost to equivalent pair shares: total_cost / pair_cost
-      const equivalentPairShares = newPairCost > 0 ? totalCost / newPairCost : 0;
-      
+      const equivalentPairShares =
+        newPairCost > 0 ? totalCost / newPairCost : 0;
+
       // Ensure minimum side has at least 1.02x the equivalent pair shares
       if (newMinQty <= equivalentPairShares * 1.02) {
         return false;
@@ -803,7 +895,9 @@ export class NuoiemStrategy extends TradingStrategy {
     return true;
   }
 
-  private calculateWeightedAverage(entries: Array<{ price: number; size: number }>): number {
+  private calculateWeightedAverage(
+    entries: Array<{ price: number; size: number }>
+  ): number {
     if (entries.length === 0) return 0;
     const totalCost = entries.reduce((sum, e) => sum + e.price * e.size, 0);
     const totalSize = entries.reduce((sum, e) => sum + e.size, 0);
@@ -823,8 +917,14 @@ export class NuoiemStrategy extends TradingStrategy {
     lowerPrice: number
   ): void {
     // Calculate total size from entries
-    const higherEntriesSize = this.higherEntries.reduce((sum, e) => sum + e.size, 0);
-    const lowerEntriesSize = this.lowerEntries.reduce((sum, e) => sum + e.size, 0);
+    const higherEntriesSize = this.higherEntries.reduce(
+      (sum, e) => sum + e.size,
+      0
+    );
+    const lowerEntriesSize = this.lowerEntries.reduce(
+      (sum, e) => sum + e.size,
+      0
+    );
 
     // If position grew, add new entry (successful order)
     if (higherSize > higherEntriesSize) {
@@ -832,16 +932,19 @@ export class NuoiemStrategy extends TradingStrategy {
       // Estimate price: use average of existing entries, or use current market price if available
       // Better estimate: if we have entries, use their avg; otherwise use a conservative estimate
       // Note: Ideally we'd have actual fill prices, but we estimate based on entry pattern
-      const estimatedPrice = this.higherEntries.length > 0
-        ? this.calculateWeightedAverage(this.higherEntries)
-        : (higherPosition && higherPosition.size > 0 
-            ? Math.min(0.57, Math.max(0.52, higherPrice)) // Use current price bounded by entry range
-            : 0.55); // Fallback estimate
+      const estimatedPrice =
+        this.higherEntries.length > 0
+          ? this.calculateWeightedAverage(this.higherEntries)
+          : higherPosition && higherPosition.size > 0
+          ? Math.min(0.57, Math.max(0.52, higherPrice)) // Use current price bounded by entry range
+          : 0.55; // Fallback estimate
       this.higherEntries.push({ price: estimatedPrice, size: newSize });
     } else if (higherSize < higherEntriesSize) {
       // Position decreased (sold/redeemed) - rebuild entries to match
       if (higherSize > 0) {
-        const estimatedPrice = this.calculateWeightedAverage(this.higherEntries);
+        const estimatedPrice = this.calculateWeightedAverage(
+          this.higherEntries
+        );
         this.higherEntries = [{ price: estimatedPrice, size: higherSize }];
       } else {
         this.higherEntries = [];
@@ -851,11 +954,12 @@ export class NuoiemStrategy extends TradingStrategy {
     // Same for lower leg
     if (lowerSize > lowerEntriesSize) {
       const newSize = lowerSize - lowerEntriesSize;
-      const estimatedPrice = this.lowerEntries.length > 0
-        ? this.calculateWeightedAverage(this.lowerEntries)
-        : (lowerPosition && lowerPosition.size > 0
-            ? Math.min(0.51, Math.max(0.40, lowerPrice)) // Use current price bounded by hedge range
-            : 0.50); // Fallback estimate
+      const estimatedPrice =
+        this.lowerEntries.length > 0
+          ? this.calculateWeightedAverage(this.lowerEntries)
+          : lowerPosition && lowerPosition.size > 0
+          ? Math.min(0.51, Math.max(0.4, lowerPrice)) // Use current price bounded by hedge range
+          : 0.5; // Fallback estimate
       this.lowerEntries.push({ price: estimatedPrice, size: newSize });
     } else if (lowerSize < lowerEntriesSize) {
       if (lowerSize > 0) {
@@ -867,4 +971,3 @@ export class NuoiemStrategy extends TradingStrategy {
     }
   }
 }
-
