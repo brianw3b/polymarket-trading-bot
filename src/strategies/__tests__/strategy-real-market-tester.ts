@@ -260,8 +260,6 @@ export class RealMarketStrategyTester {
         minPrice: this.config.minPrice,
         maxPrice: this.config.maxPrice,
         maxPositionSize: this.config.maxPositionSize,
-        stopLossPercentage: this.config.stopLossPercentage,
-        takeProfitPercentage: this.config.takeProfitPercentage,
       },
     };
   }

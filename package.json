@@ -14,7 +14,8 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:integration": "jest --testPathPattern=integration",
-    "test:real": "ts-node src/utils/__tests__/test-real-market.ts"
+    "test:real": "ts-node src/utils/__tests__/test-real-market.ts",
+    "test:nuoiem": "ts-node src/strategies/__tests__/nuoiem-strategy-tester.ts"
   },
   "keywords": [
     "polymarket",

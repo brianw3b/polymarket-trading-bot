@@ -20,8 +20,6 @@ export interface StrategyContext {
     minPrice: number;
     maxPrice: number;
     maxPositionSize: number;
-    stopLossPercentage?: number;
-    takeProfitPercentage?: number;
     // Extended config options for improved strategies (optional)
     [key: string]: number | undefined; // Allow additional numeric config values
   };

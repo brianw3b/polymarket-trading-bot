@@ -40,9 +40,14 @@ export async function getMarketBySlug(
   logger: Logger
 ): Promise<MarketInfo | null> {
   try {
+    // Add timeout (10 seconds)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
     const response = await fetch(
-      `${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`
-    );
+      `${GAMMA_API}/markets?slug=${encodeURIComponent(slug)}`,
+      { signal: controller.signal }
+    ).finally(() => clearTimeout(timeoutId));
 
     if (!response.ok) {
       throw new Error(`Gamma API error: ${response.status}`);
@@ -82,7 +87,14 @@ export async function getMarketBySlug(
       closed: market.closed ?? false,
     };
   } catch (error) {
-    logger.error("Failed to fetch market by slug", { slug, error });
+    if (error instanceof Error && error.name === "AbortError") {
+      logger.error("Timeout fetching market by slug", { slug });
+    } else {
+      logger.error("Failed to fetch market by slug", {
+        slug,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return null;
   }
 }
@@ -112,9 +124,14 @@ export async function getMarketByToken(
       params.set("offset", offset.toString());
 
       try {
+        // Add timeout (10 seconds)
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
         const response = await fetch(
-          `${GAMMA_API}/markets?${params.toString()}`
-        );
+          `${GAMMA_API}/markets?${params.toString()}`,
+          { signal: controller.signal }
+        ).finally(() => clearTimeout(timeoutId));
 
         if (!response.ok) {
           continue; // Try next strategy
@@ -210,15 +227,25 @@ export async function getTokenPrice(
   try {
     logger.debug("Fetching price for token", { tokenId });
 
+    // Add timeout wrapper (10 seconds per price fetch)
+    const timeoutPromise = (promise: Promise<any>, timeoutMs: number = 10000) => {
+      return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Price fetch timeout")), timeoutMs)
+        ),
+      ]);
+    };
+
     const [bidPriceData, askPriceData] = await Promise.all([
-      clobClient.getPrice(tokenId, Side.BUY).catch((err) => {
+      timeoutPromise(clobClient.getPrice(tokenId, Side.BUY), 10000).catch((err) => {
         logger.warn("Failed to get bid price", {
           tokenId,
           error: err instanceof Error ? err.message : String(err),
         });
         return null;
       }),
-      clobClient.getPrice(tokenId, Side.SELL).catch((err) => {
+      timeoutPromise(clobClient.getPrice(tokenId, Side.SELL), 10000).catch((err) => {
         logger.warn("Failed to get ask price", {
           tokenId,
           error: err instanceof Error ? err.message : String(err),
@@ -305,7 +332,13 @@ export async function getUserPositions(
       limit: "500",
     });
 
-    const response = await fetch(`${DATA_API}/positions?${params}`);
+    // Add timeout (10 seconds)
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(`${DATA_API}/positions?${params}`, {
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timeoutId));
 
     if (!response.ok) {
       throw new Error(`Data API error: ${response.status}`);
@@ -326,7 +359,14 @@ export async function getUserPositions(
       redeemable: pos.redeemable !== undefined ? pos.redeemable : false,
     }));
   } catch (error) {
-    logger.error("Failed to fetch user positions", { userAddress, error });
+    if (error instanceof Error && error.name === "AbortError") {
+      logger.error("Timeout fetching user positions", { userAddress });
+    } else {
+      logger.error("Failed to fetch user positions", {
+        userAddress,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     return [];
   }
 }

@@ -29,12 +29,10 @@ export interface BotConfig {
   minPrice: number;
   maxPrice: number;
   pollIntervalMs: number;
-  maxOrdersPerCycle: number;
 
   // Risk Management
   maxPositionSize: number;
-  stopLossPercentage: number;
-  takeProfitPercentage: number;
+  maxBudgetPerPool?: number; // Maximum USD budget per pool/market (optional, defaults to 100)
 
   // Logging
   logLevel: string;
@@ -89,12 +87,10 @@ export function loadConfig(): BotConfig {
     minPrice: getEnvNumber("MIN_PRICE", 0.01),
     maxPrice: getEnvNumber("MAX_PRICE", 0.99),
     pollIntervalMs: getEnvNumber("POLL_INTERVAL_MS", 1000),
-    maxOrdersPerCycle: getEnvNumber("MAX_ORDERS_PER_CYCLE", 1),
 
     // Risk Management
     maxPositionSize: getEnvNumber("MAX_POSITION_SIZE", 100),
-    stopLossPercentage: getEnvNumber("STOP_LOSS_PERCENTAGE", 0.05),
-    takeProfitPercentage: getEnvNumber("TAKE_PROFIT_PERCENTAGE", 0.1),
+    maxBudgetPerPool: getEnvNumber("MAX_BUDGET_PER_POOL", 60), // Default $100 per pool
 
     // Logging
     logLevel: getEnvVar("LOG_LEVEL", "info"),

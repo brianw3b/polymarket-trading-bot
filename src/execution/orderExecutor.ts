@@ -11,12 +11,44 @@ export class OrderExecutor {
 
   async executeOrder(decision: TradingDecision): Promise<string | null> {
     try {
+      // Additional validation
+      if (!decision || !decision.tokenId || decision.price === undefined || decision.size === undefined) {
+        this.logger.error("Invalid decision: missing required fields", { decision });
+        return null;
+      }
+
       const side = decision.action === "BUY_YES" || decision.action === "BUY_NO" 
         ? Side.BUY 
         : Side.SELL;
 
-      if (decision.price <= 0 || decision.price >= 1) {
-        this.logger.warn("Invalid price for order", { price: decision.price });
+      // Enhanced price validation
+      if (
+        typeof decision.price !== "number" ||
+        isNaN(decision.price) ||
+        !isFinite(decision.price) ||
+        decision.price <= 0 ||
+        decision.price >= 1
+      ) {
+        this.logger.warn("Invalid price for order", {
+          price: decision.price,
+          tokenId: decision.tokenId,
+          action: decision.action,
+        });
+        return null;
+      }
+
+      // Enhanced size validation
+      if (
+        typeof decision.size !== "number" ||
+        isNaN(decision.size) ||
+        !isFinite(decision.size) ||
+        decision.size <= 0
+      ) {
+        this.logger.warn("Invalid size for order", {
+          size: decision.size,
+          tokenId: decision.tokenId,
+          action: decision.action,
+        });
         return null;
       }
 
@@ -47,11 +79,19 @@ export class OrderExecutor {
 
       let response;
       try {
-        response = await this.clobClient.createAndPostOrder(
-          order,
-          { negRisk: false },
-          OrderType.GTC
-        );
+        // Add timeout wrapper for order submission (30 seconds)
+        const timeoutPromise = new Promise((_, reject) => {
+          setTimeout(() => reject(new Error("Order submission timeout")), 30000);
+        });
+
+        response = await Promise.race([
+          this.clobClient.createAndPostOrder(
+            order,
+            { negRisk: false },
+            OrderType.GTC
+          ),
+          timeoutPromise,
+        ]) as any;
       } catch (orderError: any) {
         const errorData = orderError?.response?.data || orderError?.data || {};
         const errorMessage = errorData?.error || orderError?.message || String(orderError);
@@ -133,7 +173,16 @@ export class OrderExecutor {
 
   async getActiveOrders(): Promise<any[]> {
     try {
-      const orders = await this.clobClient.getOpenOrders();
+      // Add timeout wrapper for getOpenOrders (10 seconds)
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("getActiveOrders timeout after 10 seconds")), 10000);
+      });
+
+      const orders = await Promise.race([
+        this.clobClient.getOpenOrders(),
+        timeoutPromise,
+      ]) as any[];
+
       return orders || [];
     } catch (error) {
       this.logger.error("Failed to fetch active orders", {
