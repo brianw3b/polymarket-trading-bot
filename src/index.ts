@@ -428,6 +428,21 @@ class PolymarketTradingBot {
         });
 
         const activeOrders = await this.orderExecutor.getActiveOrders();
+        
+        // Check if we already have an active order for this token (prevents duplicate orders)
+        const hasActiveOrderForToken = activeOrders.some(
+          (order: any) => order.tokenID === decision.tokenId
+        );
+        
+        if (hasActiveOrderForToken) {
+          this.logger.info("Active order already exists for this token, skipping", {
+            tokenId: decision.tokenId,
+            activeOrders: activeOrders.length,
+            reason: decision.reason,
+          });
+          return;
+        }
+        
         if (activeOrders.length >= this.config.maxOrdersPerCycle) {
           this.logger.info("Max orders per cycle reached, skipping order", {
             activeOrders: activeOrders.length,

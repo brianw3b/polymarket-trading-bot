@@ -402,8 +402,8 @@ export class NuoiemStrategy extends TradingStrategy {
   ): TradingDecision | null {
     const minHigherPrice = 0.52;
     const maxHigherPrice = 0.57;
-    const probeSizeMin = 20; // Increased from 10
-    const probeSizeMax = 40; // Increased from 30
+    const probeSizeMin = 10; // Reduced from 20 to lower spending
+    const probeSizeMax = 20; // Reduced from 40 to lower spending
     const maxProjectedAvg = 0.6;
     const maxProjectedPairCost = 1.00; // Skip entry if projected pair cost exceeds this
 
@@ -411,7 +411,7 @@ export class NuoiemStrategy extends TradingStrategy {
       return null;
     }
 
-    // Vary entry size between 20-40 shares (increased from 10-30)
+    // Vary entry size between 10-20 shares (reduced from 20-40 to lower spending)
     // Use price proximity to max (0.57) to determine size: closer to max = smaller size
     const priceRange = maxHigherPrice - minHigherPrice;
     const pricePosition = (higherPrice - minHigherPrice) / priceRange; // 0 to 1
@@ -718,8 +718,8 @@ export class NuoiemStrategy extends TradingStrategy {
     const targetBuySize = Math.floor(lowerSize * buyRatio);
 
     const roundedSize = Math.max(
-      10,
-      Math.min(50, Math.round(targetBuySize / 10) * 10)
+      5, // Reduced from 10
+      Math.min(25, Math.round(targetBuySize / 10) * 10) // Reduced from 50 to 25
     );
     if (roundedSize <= 0) {
       return null;
@@ -790,21 +790,21 @@ export class NuoiemStrategy extends TradingStrategy {
     currentPrice: number,
     avgHigher: number
   ): number {
-    // 50–150 shares, larger when dip is larger
-    const baseMin = 50;
-    const baseMax = 150;
+    // 25–75 shares (reduced from 50-150), larger when dip is larger
+    const baseMin = 25;
+    const baseMax = 75;
     const dipAmount = avgHigher - currentPrice;
     if (dipAmount <= 0) return 0;
 
     const sizeMultiplier = Math.min(4, Math.floor(dipAmount / 0.01)); // up to 4x
-    const addSize = Math.min(baseMax, baseMin + sizeMultiplier * 20);
+    const addSize = Math.min(baseMax, baseMin + sizeMultiplier * 10); // Reduced multiplier from 20 to 10
     return addSize;
   }
 
   private computeLowerAddSize(higherSize: number, lowerSize: number): number {
-    // 70–140 shares, targeting ~70% of higher qty
-    const baseMin = 70;
-    const baseMax = 140;
+    // 35–70 shares (reduced from 70-140), targeting ~70% of higher qty
+    const baseMin = 35;
+    const baseMax = 70;
     const targetLowerSize = Math.floor(higherSize * 0.7);
     const needed = targetLowerSize - lowerSize;
     // Allow adding even if close to target (within 10 shares) to maintain balance
@@ -818,8 +818,9 @@ export class NuoiemStrategy extends TradingStrategy {
     lowerSize: number
   ): number {
     // For pair >0.95 repeat check, use similar logic but can be more flexible
-    const baseMin = 50;
-    const baseMax = 150;
+    // Reduced from 50-150 to 25-75 to lower spending
+    const baseMin = 25;
+    const baseMax = 75;
     const targetLowerSize = Math.floor(higherSize * 0.7);
     const needed = targetLowerSize - lowerSize;
     if (needed <= 0) return Math.min(baseMax, baseMin);
