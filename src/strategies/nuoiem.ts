@@ -43,6 +43,7 @@ export class NuoiemStrategy extends TradingStrategy {
   private avgDownOrdersPlaced: number = 0; // Track avg-down ladder orders
   private repeatAddsHigherCount: number = 0; // Track repeat adds to higher leg
   private repeatAddsLowerCount: number = 0; // Track repeat adds to lower leg
+  private currentActiveOrders: Array<{ tokenID?: string; tokenId?: string; asset?: string; price?: number; size?: number; limitPrice?: number; orderPrice?: number; amount?: number; quantity?: number }> = []; // Track active orders for budget calculation
 
   reset(): void {
     this.higherEntries = [];
@@ -58,12 +59,15 @@ export class NuoiemStrategy extends TradingStrategy {
   }
 
   execute(context: StrategyContext): TradingDecision | null {
-    const { yesTokenPrice, noTokenPrice, positions, config, timeUntilEnd } =
+    const { yesTokenPrice, noTokenPrice, positions, config, timeUntilEnd, activeOrders } =
       context;
 
     if (!yesTokenPrice || !noTokenPrice) {
       return null;
     }
+
+    // Store active orders for budget calculations in helper functions
+    this.currentActiveOrders = activeOrders || [];
 
     // Determine which leg is higher
     const yesIsHigher = yesTokenPrice.askPrice >= noTokenPrice.askPrice;
@@ -79,6 +83,17 @@ export class NuoiemStrategy extends TradingStrategy {
     const lowerTokenId = yesIsHigher
       ? noTokenPrice.tokenId
       : yesTokenPrice.tokenId;
+
+    // Check for active orders to avoid duplicate decisions
+    const hasActiveOrderForHigher = activeOrders?.some((order: any) => {
+      const orderTokenId = order.tokenID || order.tokenId || order.asset;
+      return orderTokenId === higherTokenId;
+    }) || false;
+    
+    const hasActiveOrderForLower = activeOrders?.some((order: any) => {
+      const orderTokenId = order.tokenID || order.tokenId || order.asset;
+      return orderTokenId === lowerTokenId;
+    }) || false;
 
     // Initialize higher leg tracking
     if (this.higherLeg === null && higherPrice >= 0.52) {
@@ -231,7 +246,8 @@ export class NuoiemStrategy extends TradingStrategy {
       const effectiveCurrentPairCostForRepeat = allowMarketRecovery ? currentMarketPairCost : currentPairCost;
 
       // Check if we can add to higher leg (dip ≥effectiveDipThresholdRepeat)
-      if (avgHigher > 0 && higherSize > 0 && higherPrice <= avgHigher - effectiveDipThresholdRepeat) {
+      // Skip if there's already an active order for higher token
+      if (avgHigher > 0 && higherSize > 0 && !hasActiveOrderForHigher && higherPrice <= avgHigher - effectiveDipThresholdRepeat) {
         const addUSD = this.computeHigherAddUSD(higherPrice, avgHigher, config);
         if (addUSD > 0) {
           // Ladder offsets: -0.01, -0.02 for repeat adds
@@ -280,7 +296,8 @@ export class NuoiemStrategy extends TradingStrategy {
       }
 
       // Check if we can add to lower leg (dip ≥effectiveDipThresholdRepeat)
-      if (avgLower > 0 && lowerSize > 0 && lowerPrice <= avgLower - effectiveDipThresholdRepeat) {
+      // Skip if there's already an active order for lower token
+      if (avgLower > 0 && lowerSize > 0 && !hasActiveOrderForLower && lowerPrice <= avgLower - effectiveDipThresholdRepeat) {
         const addUSD = this.computeLowerAddUSDForPair(
           higherSize,
           lowerSize,
@@ -338,8 +355,16 @@ export class NuoiemStrategy extends TradingStrategy {
     // All other actions available anytime (no phase restrictions)
 
     // 1. Entry: Identify higher leg and probe (if no higher position yet)
-    const entryOrdersCount = this.higherEntries.length;
-    if (higherSize === 0 && entryOrdersCount < 2) {
+    // Skip if there's already an active order for higher token
+    // Count both filled entries AND active orders to prevent making too many entry orders
+    const filledEntryCount = this.higherEntries.length;
+    const activeEntryOrders = this.currentActiveOrders.filter((order: any) => {
+      const orderTokenId = order.tokenID || order.tokenId || order.asset;
+      return orderTokenId === higherTokenId;
+    }).length;
+    const entryOrdersCount = filledEntryCount + activeEntryOrders;
+    
+    if (higherSize === 0 && !hasActiveOrderForHigher && entryOrdersCount < 2) {
       const entryDecision = this.entryPhase(
         higherTokenId,
         lowerTokenId,
@@ -355,7 +380,8 @@ export class NuoiemStrategy extends TradingStrategy {
     }
 
     // 2. Avg-down higher: If dips ≥2.5¢ from avg (prioritized)
-    if (avgHigher > 0 && higherSize > 0) {
+    // Skip if there's already an active order for higher token
+    if (avgHigher > 0 && higherSize > 0 && !hasActiveOrderForHigher) {
       const avgDownDecision = this.avgDownHigher(
         higherTokenId,
         higherPrice,
@@ -378,9 +404,11 @@ export class NuoiemStrategy extends TradingStrategy {
     // Also allow hedging if balance is off
     // For first hedge, allow even if higherSize is 0 (orders might be pending)
     // Check if we have higher entries (even if positions not updated yet)
+    // Skip if there's already an active order for lower token
     const hasHigherEntries = this.higherEntries.length > 0;
     const needsHedge = lowerSize < higherSize * 0.65; // If lower is less than 65% of higher
     if (
+      !hasActiveOrderForLower && // Don't hedge if there's already an active order
       lowerPrice < 0.51 &&
       (higherSize > 0 || hasHigherEntries) // Allow hedge if we have higher positions OR higher entries
     ) {
@@ -655,7 +683,19 @@ export class NuoiemStrategy extends TradingStrategy {
 
     // Ladder offsets: -0.02, -0.05
     const priceOffsets = [-0.02, -0.05];
-    const hedgeOrdersCount = this.lowerEntries.length;
+    // Count both filled entries AND active orders to prevent making too many hedge orders
+    const filledHedgeCount = this.lowerEntries.length;
+    const activeHedgeOrders = this.currentActiveOrders.filter((order: any) => {
+      const orderTokenId = order.tokenID || order.tokenId || order.asset;
+      return orderTokenId === lowerTokenId;
+    }).length;
+    const hedgeOrdersCount = filledHedgeCount + activeHedgeOrders;
+    
+    // Limit to 2 hedge orders max (as per algorithm: ladder with 2 price offsets)
+    if (hedgeOrdersCount >= 2) {
+      return null; // Already have 2 hedge orders (filled or pending)
+    }
+    
     const offset =
       priceOffsets[hedgeOrdersCount] ?? priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, lowerPrice + offset);
@@ -949,9 +989,15 @@ export class NuoiemStrategy extends TradingStrategy {
     const currentLowerUSDValue = this.sharesToUSD(lowerSize, lowerPrice);
     const neededUSD = targetLowerUSDValue - currentLowerUSDValue;
     
-    // If we need more than base, use what's needed (up to max)
-    if (neededUSD > baseMaxUSD) {
-      return Math.min(neededUSD, remainingBudget);
+    // CRITICAL: Cap hedge allocation at baseMaxUSD (40% of budget) to prevent overspending
+    // Even if we need more to reach 70% of higher leg, we should not exceed the budget cap
+    // The algorithm specifies "$20-40 USD" for hedge, which is 20-40% of a $100 budget
+    // For smaller budgets, we scale proportionally but still cap at 40%
+    const maxAllowedUSD = Math.min(baseMaxUSD, remainingBudget);
+    
+    // If we need more than the cap, use the cap (don't exceed budget limits)
+    if (neededUSD > maxAllowedUSD) {
+      return maxAllowedUSD;
     }
     
     // If close to target (within 5% of budget), add minimum
@@ -960,8 +1006,8 @@ export class NuoiemStrategy extends TradingStrategy {
       return Math.min(baseMinUSD, remainingBudget);
     }
     
-    // Otherwise, use needed amount (within base range)
-    return Math.min(Math.max(baseMinUSD, neededUSD), remainingBudget);
+    // Otherwise, use needed amount (within base range, capped at maxAllowedUSD)
+    return Math.min(Math.max(baseMinUSD, neededUSD), maxAllowedUSD);
   }
 
   /**
@@ -992,7 +1038,9 @@ export class NuoiemStrategy extends TradingStrategy {
       return Math.min(baseMinUSD, remainingBudget);
     }
     
-    return Math.min(Math.max(baseMinUSD, neededUSD), Math.min(baseMaxUSD, remainingBudget));
+    // CRITICAL: Cap at baseMaxUSD (40% of budget) to prevent overspending in repeat checks
+    const maxAllowedUSD = Math.min(baseMaxUSD, remainingBudget);
+    return Math.min(Math.max(baseMinUSD, neededUSD), maxAllowedUSD);
   }
 
   /**
@@ -1161,10 +1209,30 @@ export class NuoiemStrategy extends TradingStrategy {
 
   /**
    * Get remaining budget available for trading
+   * Accounts for both filled positions (via entries) and active pending orders
    */
   private getRemainingBudget(config: StrategyContext["config"]): number {
     const maxBudget = this.getMaxBudgetPerPool(config);
-    const spent = this.calculateTotalCostUSD();
+    let spent = this.calculateTotalCostUSD();
+    
+    // Add cost of active pending orders that aren't yet reflected in entries
+    // This prevents the strategy from thinking it has more budget than it actually does
+    if (this.currentActiveOrders && this.currentActiveOrders.length > 0) {
+      for (const order of this.currentActiveOrders) {
+        const orderTokenId = order.tokenID || order.tokenId || order.asset;
+        if (!orderTokenId) continue;
+        
+        const orderPrice = order.price || order.limitPrice || order.orderPrice || 0;
+        const orderSize = order.size || order.amount || order.quantity || 0;
+        
+        if (orderPrice > 0 && orderSize > 0) {
+          // Add cost of pending order to spent amount
+          // This ensures we don't overspend by making multiple orders before positions update
+          spent += orderPrice * orderSize;
+        }
+      }
+    }
+    
     return Math.max(0, maxBudget - spent);
   }
 

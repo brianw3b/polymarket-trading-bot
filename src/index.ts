@@ -46,6 +46,7 @@ class PolymarketTradingBot {
   private intervalId: NodeJS.Timeout | null = null;
   private relayClient: any = null;
   private lastRedeemCheck: Map<string, number> = new Map(); // Track last redeem attempt per conditionId
+  private successfullyRedeemedConditions: Set<string> = new Set(); // Track successfully redeemed conditionIds to avoid re-redeeming
   
   // CSV logging tracking
   private trades: TradeRecord[] = [];
@@ -339,8 +340,6 @@ class PolymarketTradingBot {
       // Store market and token info for CSV logging
       this.currentMarket = market;
       const { yesTokenId, noTokenId } = findTokenIdsForMarket(market, "YES");
-      this.yesTokenId = yesTokenId || null;
-      this.noTokenId = noTokenId || null;
 
       if (!yesTokenId || !noTokenId) {
         this.logger.warn("Could not find YES/NO token IDs", {
@@ -349,6 +348,28 @@ class PolymarketTradingBot {
         });
         return;
       }
+
+      // Check if market has changed (by comparing tokenIds) BEFORE updating
+      // This must happen before we update this.yesTokenId and this.noTokenId
+      const previousYesTokenId = this.yesTokenId;
+      const previousNoTokenId = this.noTokenId;
+      const marketChanged = 
+        (previousYesTokenId && previousYesTokenId !== yesTokenId) ||
+        (previousNoTokenId && previousNoTokenId !== noTokenId);
+      
+      if (marketChanged && this.strategy && typeof this.strategy.reset === 'function') {
+        this.logger.info("Market changed, resetting strategy state", {
+          previousMarket: { yesTokenId: previousYesTokenId, noTokenId: previousNoTokenId },
+          newMarket: { yesTokenId, noTokenId },
+          previousMarketQuestion: this.currentMarket?.question,
+          newMarketQuestion: market.question,
+        });
+        this.strategy.reset();
+      }
+
+      // Now update the token IDs after checking for market change
+      this.yesTokenId = yesTokenId || null;
+      this.noTokenId = noTokenId || null;
 
       this.logger.info("Token IDs found", {
         yesTokenId,
@@ -422,9 +443,73 @@ class PolymarketTradingBot {
       // Update trade statuses based on current positions
       await this.updateTradeStatuses(positions, yesPrice, noPrice);
 
-      // Check if market is closed and redeem winning positions
-      if (market.closed) {
+      // Filter positions to only include current market positions
+      // This prevents counting positions from previous pools in budget calculations
+      const currentMarketPositions = positions.filter(
+        (pos) => pos.asset === yesTokenId || pos.asset === noTokenId
+      );
+
+      // Check for redeemable positions (use redeemable field from positions API)
+      // IMPORTANT: Only redeem WINNING positions (curPrice >= 0.95)
+      // Both winning and losing positions can be marked as redeemable, but we only want winning ones
+      // Also skip positions from conditionIds we've already successfully redeemed
+      const redeemablePositions = positions.filter(
+        (pos) => {
+          // Skip if we've already successfully redeemed this condition
+          const conditionId = pos.conditionId || pos.condition_id || pos.conditionID;
+          if (conditionId && this.successfullyRedeemedConditions.has(conditionId)) {
+            return false;
+          }
+          
+          return (
+            pos.redeemable === true && 
+            pos.size > 0 && 
+            (pos.curPrice !== undefined && pos.curPrice >= 0.95) // Only winning positions
+          );
+        }
+      );
+      
+      if (redeemablePositions.length > 0) {
+        this.logger.info("Found redeemable winning positions, attempting redemption", {
+          redeemableCount: redeemablePositions.length,
+          positions: redeemablePositions.map(p => ({
+            asset: p.asset,
+            size: p.size,
+            conditionId: p.conditionId,
+            outcomeIndex: p.outcomeIndex,
+            curPrice: p.curPrice,
+            outcome: p.outcome,
+            title: p.title,
+          })),
+        });
         await this.handleMarketRedemption(market, positions, yesTokenId, noTokenId, yesPrice, noPrice);
+      } else {
+        // Log why redemption is not being attempted
+        const totalPositions = positions.length;
+        const positionsWithSize = positions.filter(p => p.size > 0).length;
+        const positionsMarkedRedeemable = positions.filter(p => p.redeemable === true).length;
+        
+        this.logger.debug("No redeemable positions found", {
+          totalPositions,
+          positionsWithSize,
+          positionsMarkedRedeemable,
+          marketClosed: market.closed,
+          yesPrice: yesPrice.midPrice,
+          noPrice: noPrice.midPrice,
+        });
+        
+        // Fallback: Check if market is closed and redeem winning positions
+        // Also check if prices indicate market is resolved (one side >= 0.95)
+        const marketResolved = yesPrice.midPrice >= 0.95 || noPrice.midPrice >= 0.95;
+        if (market.closed || marketResolved) {
+          this.logger.debug("Market closed or resolved, checking for redemption (fallback)", {
+            marketClosed: market.closed,
+            marketResolved,
+            yesPrice: yesPrice.midPrice,
+            noPrice: noPrice.midPrice,
+          });
+          await this.handleMarketRedemption(market, positions, yesTokenId, noTokenId, yesPrice, noPrice);
+        }
       }
 
       let timeUntilEnd: number | undefined;
@@ -448,11 +533,35 @@ class PolymarketTradingBot {
         );
       }
 
+      // Filter positions to only include current market positions
+      // This prevents the strategy from using positions from previous pools
+      const currentMarketPositionsForStrategy = positions.filter(
+        (pos) => pos.asset === yesTokenId || pos.asset === noTokenId
+      );
+
+      // Get active orders BEFORE calling strategy so strategy can account for pending orders
+      // This prevents the strategy from making duplicate decisions
+      let activeOrders: any[] = [];
+      try {
+        activeOrders = await this.orderExecutor.getActiveOrders();
+        // Filter to only current market orders
+        activeOrders = activeOrders.filter((order: any) => {
+          const orderTokenId = order.tokenID || order.tokenId || order.asset;
+          return orderTokenId === yesTokenId || orderTokenId === noTokenId;
+        });
+      } catch (error) {
+        this.logger.error("Failed to fetch active orders before strategy execution", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // Continue with empty activeOrders - strategy will still work
+      }
+
       const context: StrategyContext = {
         tokenPrice: yesPrice,
         yesTokenPrice: yesPrice,
         noTokenPrice: noPrice,
-        positions,
+        positions: currentMarketPositionsForStrategy, // Only pass current market positions
+        activeOrders: activeOrders, // Pass active orders so strategy can avoid duplicate decisions
         timeUntilEnd,
         config: {
           orderSize: this.config.orderSize,
@@ -479,15 +588,31 @@ class PolymarketTradingBot {
         // Increment cycle count for CSV logging
         this.cycleCount++;
 
-        // Get active orders once for all decisions (prevents race conditions)
-        let activeOrders: any[] = [];
+        // Use active orders already fetched before strategy execution
+        // Filter to only current market orders (in case new orders were added)
+        let activeOrdersForValidation = activeOrders.filter((order: any) => {
+          const orderTokenId = order.tokenID || order.tokenId || order.asset;
+          return orderTokenId === yesTokenId || orderTokenId === noTokenId;
+        });
+        
+        // Refresh active orders list to get any new orders that might have been added
+        // (though we already have them from before strategy execution)
         try {
-          activeOrders = await this.orderExecutor.getActiveOrders();
+          const refreshedActiveOrders = await this.orderExecutor.getActiveOrders();
+          // Merge with existing activeOrders, avoiding duplicates
+          const existingOrderIds = new Set(activeOrdersForValidation.map((o: any) => o.orderID || o.orderId));
+          for (const order of refreshedActiveOrders) {
+            const orderTokenId = order.tokenID || order.tokenId || order.asset;
+            if ((orderTokenId === yesTokenId || orderTokenId === noTokenId) && 
+                !existingOrderIds.has(order.orderID || order.orderId)) {
+              activeOrdersForValidation.push(order);
+            }
+          }
         } catch (error) {
-          this.logger.error("Failed to fetch active orders, skipping order submission", {
+          this.logger.warn("Failed to refresh active orders, using cached list", {
             error: error instanceof Error ? error.message : String(error),
           });
-          return; // Skip this cycle if we can't check active orders
+          // Continue with existing activeOrdersForValidation
         }
 
         // Track submitted orders in this cycle to prevent duplicates within same cycle
@@ -514,8 +639,11 @@ class PolymarketTradingBot {
           });
 
           // Check if we already have an active order for this token (prevents duplicate orders)
-          const hasActiveOrderForToken = activeOrders.some(
-            (order: any) => order.tokenID === d.tokenId
+          const hasActiveOrderForToken = activeOrdersForValidation.some(
+            (order: any) => {
+              const orderTokenId = order.tokenID || order.tokenId || order.asset;
+              return orderTokenId === d.tokenId;
+            }
           );
 
           // Check if we already submitted an order for this token in this cycle
@@ -531,14 +659,19 @@ class PolymarketTradingBot {
           if (hasActiveOrderForToken) {
             this.logger.info("Active order already exists for this token, skipping", {
               tokenId: d.tokenId,
-              activeOrders: activeOrders.length,
+              activeOrders: activeOrdersForValidation.length,
+              matchingOrders: activeOrdersForValidation.filter((o: any) => {
+                const orderTokenId = o.tokenID || o.tokenId || o.asset;
+                return orderTokenId === d.tokenId;
+              }).length,
               reason: d.reason,
             });
             continue;
           }
 
           // Validate budget before submitting order (includes active orders and in-cycle orders)
-          if (!this.validateBudget(d, positions, yesPrice, noPrice, activeOrders, ordersSubmittedInCycle)) {
+          // Use currentMarketPositions (already filtered) instead of full positions array
+          if (!this.validateBudget(d, currentMarketPositions, yesPrice, noPrice, activeOrdersForValidation, ordersSubmittedInCycle)) {
             this.logger.warn("Order would exceed budget, skipping", {
               tokenId: d.tokenId,
               price: d.price,
@@ -583,7 +716,7 @@ class PolymarketTradingBot {
               });
               // Add to active orders list to prevent duplicates in subsequent decisions
               // Include price and size for accurate budget tracking
-              activeOrders.push({
+              activeOrdersForValidation.push({
                 tokenID: d.tokenId,
                 orderID: orderId,
                 price: d.price,
@@ -698,15 +831,27 @@ class PolymarketTradingBot {
     }
 
     try {
-      // Determine winning outcome: YES wins if YES price = 1.0, NO wins if NO price = 1.0
-      // In practice, when market closes, winning side price approaches 1.0
-      const yesWins = yesPrice.midPrice >= 0.99;
-      const noWins = noPrice.midPrice >= 0.99;
+      // Determine winning outcome: YES wins if YES price >= 0.95, NO wins if NO price >= 0.95
+      // Use 0.95 threshold instead of 0.99 to catch more resolved markets
+      // Also check if one side is significantly higher than the other
+      const priceDiff = Math.abs(yesPrice.midPrice - noPrice.midPrice);
+      const yesWins = yesPrice.midPrice >= 0.95 && yesPrice.midPrice > noPrice.midPrice;
+      const noWins = noPrice.midPrice >= 0.95 && noPrice.midPrice > yesPrice.midPrice;
+
+      this.logger.debug("Checking market resolution", {
+        yesPrice: yesPrice.midPrice,
+        noPrice: noPrice.midPrice,
+        priceDiff,
+        yesWins,
+        noWins,
+        positionsCount: positions.length,
+      });
 
       if (!yesWins && !noWins) {
         this.logger.info("Market closed but outcome not yet determined", {
           yesPrice: yesPrice.midPrice,
           noPrice: noPrice.midPrice,
+          threshold: 0.95,
         });
         return;
       }
@@ -722,30 +867,125 @@ class PolymarketTradingBot {
         outcomeIndex,
       });
 
-      // Find positions for winning outcome
-      const winningPositions = positions.filter(
-        (pos) => pos.asset === winningTokenId && pos.size > 0
+      // Find redeemable positions (prefer redeemable field, fallback to winning outcome)
+      // IMPORTANT: Only redeem WINNING positions (curPrice >= 0.95)
+      // Both winning and losing positions can be marked as redeemable, but we only want winning ones
+      let redeemablePositions = positions.filter(
+        (pos) => 
+          pos.redeemable === true && 
+          pos.size > 0 && 
+          (pos.curPrice !== undefined && pos.curPrice >= 0.95) // Only winning positions
       );
 
-      if (winningPositions.length === 0) {
-        this.logger.info("No winning positions to redeem");
+      // If no explicitly redeemable winning positions, fall back to finding winning positions by token
+      if (redeemablePositions.length === 0) {
+        redeemablePositions = positions.filter(
+          (pos) => pos.asset === winningTokenId && pos.size > 0
+        );
+      }
+
+      if (redeemablePositions.length === 0) {
+        this.logger.info("No redeemable positions found", {
+          totalPositions: positions.length,
+          positionsWithSize: positions.filter(p => p.size > 0).length,
+          positionsMarkedRedeemable: positions.filter(p => p.redeemable === true).length,
+          allPositions: positions.map(p => ({
+            asset: p.asset,
+            size: p.size,
+            redeemable: p.redeemable,
+            curPrice: p.curPrice,
+            outcome: p.outcome,
+          })),
+        });
         return;
       }
 
+      this.logger.info("Found redeemable positions", {
+        count: redeemablePositions.length,
+        positions: redeemablePositions.map(p => ({
+          asset: p.asset,
+          size: p.size,
+          conditionId: p.conditionId,
+          outcomeIndex: p.outcomeIndex,
+          redeemable: p.redeemable,
+          curPrice: p.curPrice,
+          outcome: p.outcome,
+          title: p.title,
+        })),
+      });
+
       // Group positions by conditionId
       const positionsByCondition = new Map<string, any[]>();
-      for (const pos of winningPositions) {
-        if (pos.conditionId) {
-          if (!positionsByCondition.has(pos.conditionId)) {
-            positionsByCondition.set(pos.conditionId, []);
+      const positionsWithoutConditionId: any[] = [];
+      
+      for (const pos of redeemablePositions) {
+        // Try multiple field names for conditionId
+        let conditionId = pos.conditionId || pos.condition_id || pos.conditionID;
+        
+        // If conditionId is still missing, try to extract from market or use a fallback
+        // Note: In Polymarket, conditionId is typically derived from the market
+        // For now, we'll log and skip positions without conditionId
+        if (!conditionId) {
+          // Try to get conditionId from market if available
+          // Some markets have conditionId in their metadata
+          if (market.conditionId) {
+            conditionId = market.conditionId;
+            this.logger.info("Using conditionId from market", {
+              conditionId,
+              asset: pos.asset,
+            });
+          } else {
+            positionsWithoutConditionId.push(pos);
+            this.logger.warn("Position missing conditionId and market doesn't have it", {
+              asset: pos.asset,
+              size: pos.size,
+              redeemable: pos.redeemable,
+              positionKeys: Object.keys(pos),
+              marketId: market.id,
+            });
+            continue;
           }
-          positionsByCondition.get(pos.conditionId)!.push(pos);
         }
+        
+        if (conditionId) {
+          if (!positionsByCondition.has(conditionId)) {
+            positionsByCondition.set(conditionId, []);
+          }
+          positionsByCondition.get(conditionId)!.push(pos);
+        }
+      }
+
+      if (positionsWithoutConditionId.length > 0) {
+        this.logger.warn("Some redeemable positions missing conditionId, cannot redeem", {
+          count: positionsWithoutConditionId.length,
+          positions: positionsWithoutConditionId.map(p => ({ 
+            asset: p.asset, 
+            size: p.size,
+            redeemable: p.redeemable,
+          })),
+        });
+      }
+
+      if (positionsByCondition.size === 0) {
+        this.logger.warn("No positions with conditionId found for redemption", {
+          redeemablePositionsCount: redeemablePositions.length,
+          positionsWithoutConditionId: positionsWithoutConditionId.length,
+        });
+        return;
       }
 
       // Redeem positions for each conditionId
       for (const [conditionId, conditionPositions] of positionsByCondition) {
         const totalSize = conditionPositions.reduce((sum, p) => sum + p.size, 0);
+        
+        // Skip if we've already successfully redeemed this condition
+        if (this.successfullyRedeemedConditions.has(conditionId)) {
+          this.logger.debug("Skipping redeem - already successfully redeemed", {
+            conditionId,
+            totalSize,
+          });
+          continue;
+        }
         
         // Check if we already tried to redeem this condition recently (within 5 minutes)
         const lastRedeemAttempt = this.lastRedeemCheck.get(conditionId) || 0;
@@ -758,17 +998,36 @@ class PolymarketTradingBot {
           continue;
         }
 
-        this.logger.info("Redeeming winning positions", {
+        this.logger.info("Redeeming positions", {
           conditionId,
           outcomeIndex,
           winningOutcome,
           totalSize,
           positionsCount: conditionPositions.length,
+          redeemable: conditionPositions[0]?.redeemable,
         });
 
         try {
           // Use outcomeIndex from position if available, otherwise use determined index
           const posOutcomeIndex = conditionPositions[0]?.outcomeIndex ?? outcomeIndex;
+          
+          if (!posOutcomeIndex && posOutcomeIndex !== 0) {
+            this.logger.warn("Cannot redeem: missing outcomeIndex", {
+              conditionId,
+              positions: conditionPositions.map(p => ({
+                asset: p.asset,
+                size: p.size,
+                outcomeIndex: p.outcomeIndex,
+              })),
+            });
+            continue;
+          }
+          
+          this.logger.info("Calling redeemPositions", {
+            conditionId,
+            outcomeIndex: posOutcomeIndex,
+            totalSize,
+          });
           
           await redeemPositions(
             this.relayClient,
@@ -779,6 +1038,8 @@ class PolymarketTradingBot {
             this.logger
           );
 
+          // Mark as successfully redeemed to prevent future attempts
+          this.successfullyRedeemedConditions.add(conditionId);
           this.lastRedeemCheck.set(conditionId, now);
           this.logger.info("Successfully redeemed positions", {
             conditionId,
@@ -790,8 +1051,10 @@ class PolymarketTradingBot {
             conditionId,
             outcomeIndex,
             error: error instanceof Error ? error.message : String(error),
+            errorStack: error instanceof Error ? error.stack : undefined,
           });
-          // Still update last attempt to avoid spamming
+          // Still update last attempt to avoid spamming, but use shorter delay for retry
+          // If it's a real error (not just "not ready yet"), we should retry sooner
           this.lastRedeemCheck.set(conditionId, now);
         }
       }
@@ -901,9 +1164,15 @@ class PolymarketTradingBot {
       return true; // No budget limit configured
     }
 
-    // Calculate current spent amount from filled positions
+    // CRITICAL: Filter positions to only include current market positions
+    // This prevents counting positions from previous pools in budget calculations
+    const currentMarketPositions = positions.filter(
+      (pos) => pos.asset === yesPrice.tokenId || pos.asset === noPrice.tokenId
+    );
+
+    // Calculate current spent amount from filled positions (only current market)
     let totalSpent = 0;
-    for (const pos of positions) {
+    for (const pos of currentMarketPositions) {
       const tokenPrice = pos.asset === yesPrice.tokenId ? yesPrice : noPrice;
       // Estimate cost: use current ask price as approximation
       // (in reality, we'd need to track actual entry prices)
@@ -911,10 +1180,16 @@ class PolymarketTradingBot {
     }
 
     // Add cost of active pending orders (orders that haven't filled yet)
+    // Only count orders for current market tokens
     for (const order of activeOrders) {
       // Handle different field name variations (tokenID, tokenId, etc.)
       const orderTokenId = order.tokenID || order.tokenId || order.asset;
       if (!orderTokenId) continue; // Skip if we can't identify the token
+      
+      // Only count orders for current market tokens
+      if (orderTokenId !== yesPrice.tokenId && orderTokenId !== noPrice.tokenId) {
+        continue; // Skip orders from other markets
+      }
       
       const tokenPrice = orderTokenId === yesPrice.tokenId ? yesPrice : noPrice;
       // Use order price if available (check multiple possible field names)
@@ -946,7 +1221,7 @@ class PolymarketTradingBot {
 
     if (newTotal > this.config.maxBudgetPerPool) {
       this.logger.warn("Budget validation failed", {
-        filledPositionsCost: positions.reduce((sum, pos) => {
+        filledPositionsCost: currentMarketPositions.reduce((sum, pos) => {
           const tokenPrice = pos.asset === yesPrice.tokenId ? yesPrice : noPrice;
           return sum + pos.size * tokenPrice.askPrice;
         }, 0).toFixed(2),

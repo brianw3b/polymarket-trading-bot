@@ -29,6 +29,10 @@ export interface Position {
   conditionId?: string;
   outcomeIndex?: number;
   redeemable?: boolean;
+  curPrice?: number;
+  title?: string;
+  slug?: string;
+  outcome?: string;
 }
 
 /**
@@ -353,10 +357,19 @@ export async function getUserPositions(
     return data.map((pos) => ({
       asset: pos.asset,
       size: parseFloat(pos.size) || 0,
-      side: pos.side || "YES",
-      conditionId: pos.conditionId || pos.condition_id,
-      outcomeIndex: pos.outcomeIndex !== undefined ? pos.outcomeIndex : (pos.outcome_index !== undefined ? pos.outcome_index : undefined),
-      redeemable: pos.redeemable !== undefined ? pos.redeemable : false,
+      side: pos.side || pos.outcome || "YES", // Use outcome if side not available
+      conditionId: pos.conditionId || pos.condition_id || pos.conditionID,
+      outcomeIndex: pos.outcomeIndex !== undefined 
+        ? pos.outcomeIndex 
+        : (pos.outcome_index !== undefined 
+          ? pos.outcome_index 
+          : undefined),
+      redeemable: pos.redeemable !== undefined ? Boolean(pos.redeemable) : false,
+      // Include additional fields that might be useful
+      curPrice: pos.curPrice !== undefined ? parseFloat(pos.curPrice) : undefined,
+      title: pos.title,
+      slug: pos.slug,
+      outcome: pos.outcome,
     }));
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {

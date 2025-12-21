@@ -13,6 +13,7 @@ export interface StrategyContext {
   yesTokenPrice?: TokenPrice;
   noTokenPrice?: TokenPrice;
   positions: Position[];
+  activeOrders?: Array<{ tokenID?: string; tokenId?: string; asset?: string; price?: number; size?: number }>; // Pending orders to help strategy avoid duplicate decisions
   marketEndTime?: Date; // Market end time for time-based markets
   timeUntilEnd?: number; // Milliseconds until market ends
   config: {
