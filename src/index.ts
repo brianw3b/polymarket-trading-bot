@@ -1,6 +1,6 @@
 import { loadConfig } from "./config";
 import { createLogger } from "./utils/logger";
-import { initializeWallet, initializeClobClient, WalletSetup } from "./utils/wallet";
+import { initializeWallet, initializeClobClient } from "./utils/wallet";
 import {
   getMarketByToken,
   getMarketBySlug,
@@ -44,10 +44,11 @@ class PolymarketTradingBot {
   private strategy: any = null;
   private isRunning = false;
   private intervalId: NodeJS.Timeout | null = null;
+  private redeemCheckIntervalId: NodeJS.Timeout | null = null; // Separate interval for redemption checks
   private relayClient: any = null;
   private lastRedeemCheck: Map<string, number> = new Map(); // Track last redeem attempt per conditionId
   private successfullyRedeemedConditions: Set<string> = new Set(); // Track successfully redeemed conditionIds to avoid re-redeeming
-  
+
   // CSV logging tracking
   private trades: TradeRecord[] = [];
   private cycleCount = 0;
@@ -55,6 +56,18 @@ class PolymarketTradingBot {
   private currentMarket: MarketInfo | null = null;
   private yesTokenId: string | null = null;
   private noTokenId: string | null = null;
+  // Track locally submitted orders that might not yet appear in API
+  // This prevents duplicate orders when API hasn't updated yet
+  private localPendingOrders: Map<
+    string,
+    {
+      tokenId: string;
+      orderId: string;
+      price: number;
+      size: number;
+      submittedAt: number;
+    }
+  > = new Map();
 
   async initialize() {
     try {
@@ -145,7 +158,7 @@ class PolymarketTradingBot {
           this.config.targetMarketSlug,
           this.logger
         );
-        
+
         // If market not found and using pattern, try next interval (like in executeTradingCycle)
         if (!market && this.config.marketSlugPattern) {
           const timePattern =
@@ -187,7 +200,7 @@ class PolymarketTradingBot {
             }
           }
         }
-        
+
         if (!market) {
           // For pattern-based markets, allow initialization to continue
           // The execution cycle will handle finding the market
@@ -353,18 +366,28 @@ class PolymarketTradingBot {
       // This must happen before we update this.yesTokenId and this.noTokenId
       const previousYesTokenId = this.yesTokenId;
       const previousNoTokenId = this.noTokenId;
-      const marketChanged = 
+      const marketChanged =
         (previousYesTokenId && previousYesTokenId !== yesTokenId) ||
         (previousNoTokenId && previousNoTokenId !== noTokenId);
-      
-      if (marketChanged && this.strategy && typeof this.strategy.reset === 'function') {
+
+      if (
+        marketChanged &&
+        this.strategy &&
+        typeof this.strategy.reset === "function"
+      ) {
         this.logger.info("Market changed, resetting strategy state", {
-          previousMarket: { yesTokenId: previousYesTokenId, noTokenId: previousNoTokenId },
+          previousMarket: {
+            yesTokenId: previousYesTokenId,
+            noTokenId: previousNoTokenId,
+          },
           newMarket: { yesTokenId, noTokenId },
           previousMarketQuestion: this.currentMarket?.question,
           newMarketQuestion: market.question,
         });
         this.strategy.reset();
+        // Clear local pending orders when market changes (they're for previous market)
+        this.localPendingOrders.clear();
+        this.logger.debug("Cleared local pending orders due to market change");
       }
 
       // Now update the token IDs after checking for market change
@@ -450,45 +473,57 @@ class PolymarketTradingBot {
       );
 
       // Check for redeemable positions (use redeemable field from positions API)
-      // IMPORTANT: Only redeem WINNING positions (curPrice >= 0.95)
-      // Both winning and losing positions can be marked as redeemable, but we only want winning ones
+      // Redeem ALL positions where redeemable: true (both winning and losing)
+      // This helps clean up position data after markets resolve
       // Also skip positions from conditionIds we've already successfully redeemed
-      const redeemablePositions = positions.filter(
-        (pos) => {
-          // Skip if we've already successfully redeemed this condition
-          const conditionId = pos.conditionId || pos.condition_id || pos.conditionID;
-          if (conditionId && this.successfullyRedeemedConditions.has(conditionId)) {
-            return false;
-          }
-          
-          return (
-            pos.redeemable === true && 
-            pos.size > 0 && 
-            (pos.curPrice !== undefined && pos.curPrice >= 0.95) // Only winning positions
-          );
+      const redeemablePositions = positions.filter((pos) => {
+        // Skip if we've already successfully redeemed this condition
+        const conditionId =
+          pos.conditionId || pos.condition_id || pos.conditionID;
+        if (
+          conditionId &&
+          this.successfullyRedeemedConditions.has(conditionId)
+        ) {
+          return false;
         }
-      );
-      
+
+        return pos.redeemable === true && pos.size > 0;
+      });
+
       if (redeemablePositions.length > 0) {
-        this.logger.info("Found redeemable winning positions, attempting redemption", {
-          redeemableCount: redeemablePositions.length,
-          positions: redeemablePositions.map(p => ({
-            asset: p.asset,
-            size: p.size,
-            conditionId: p.conditionId,
-            outcomeIndex: p.outcomeIndex,
-            curPrice: p.curPrice,
-            outcome: p.outcome,
-            title: p.title,
-          })),
-        });
-        await this.handleMarketRedemption(market, positions, yesTokenId, noTokenId, yesPrice, noPrice);
+        this.logger.info(
+          "Found redeemable positions (winning and losing), attempting redemption",
+          {
+            redeemableCount: redeemablePositions.length,
+            positions: redeemablePositions.map((p) => ({
+              asset: p.asset,
+              size: p.size,
+              conditionId: p.conditionId,
+              outcomeIndex: p.outcomeIndex,
+              curPrice: p.curPrice,
+              cashPnl: p.cashPnl,
+              percentPnl: p.percentPnl,
+              outcome: p.outcome,
+              title: p.title,
+            })),
+          }
+        );
+        await this.handleMarketRedemption(
+          market,
+          positions,
+          yesTokenId,
+          noTokenId,
+          yesPrice,
+          noPrice
+        );
       } else {
         // Log why redemption is not being attempted
         const totalPositions = positions.length;
-        const positionsWithSize = positions.filter(p => p.size > 0).length;
-        const positionsMarkedRedeemable = positions.filter(p => p.redeemable === true).length;
-        
+        const positionsWithSize = positions.filter((p) => p.size > 0).length;
+        const positionsMarkedRedeemable = positions.filter(
+          (p) => p.redeemable === true
+        ).length;
+
         this.logger.debug("No redeemable positions found", {
           totalPositions,
           positionsWithSize,
@@ -497,18 +532,29 @@ class PolymarketTradingBot {
           yesPrice: yesPrice.midPrice,
           noPrice: noPrice.midPrice,
         });
-        
+
         // Fallback: Check if market is closed and redeem winning positions
         // Also check if prices indicate market is resolved (one side >= 0.95)
-        const marketResolved = yesPrice.midPrice >= 0.95 || noPrice.midPrice >= 0.95;
+        const marketResolved =
+          yesPrice.midPrice >= 0.95 || noPrice.midPrice >= 0.95;
         if (market.closed || marketResolved) {
-          this.logger.debug("Market closed or resolved, checking for redemption (fallback)", {
-            marketClosed: market.closed,
-            marketResolved,
-            yesPrice: yesPrice.midPrice,
-            noPrice: noPrice.midPrice,
-          });
-          await this.handleMarketRedemption(market, positions, yesTokenId, noTokenId, yesPrice, noPrice);
+          this.logger.debug(
+            "Market closed or resolved, checking for redemption (fallback)",
+            {
+              marketClosed: market.closed,
+              marketResolved,
+              yesPrice: yesPrice.midPrice,
+              noPrice: noPrice.midPrice,
+            }
+          );
+          await this.handleMarketRedemption(
+            market,
+            positions,
+            yesTokenId,
+            noTokenId,
+            yesPrice,
+            noPrice
+          );
         }
       }
 
@@ -550,10 +596,99 @@ class PolymarketTradingBot {
           return orderTokenId === yesTokenId || orderTokenId === noTokenId;
         });
       } catch (error) {
-        this.logger.error("Failed to fetch active orders before strategy execution", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+        this.logger.error(
+          "Failed to fetch active orders before strategy execution",
+          {
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
         // Continue with empty activeOrders - strategy will still work
+      }
+
+      // Merge with locally tracked pending orders (orders we submitted but API hasn't shown yet)
+      // This is critical to prevent duplicate orders when API has delay
+      // IMPORTANT: Only include orders for the CURRENT market to prevent old pool orders from affecting new pool
+      const now = Date.now();
+      const maxPendingAge = 30000; // Remove orders older than 30 seconds (they should be in API by then)
+
+      // First, clean up any orders that don't belong to current market (safety check)
+      const ordersToRemove: string[] = [];
+      for (const [orderId, localOrder] of this.localPendingOrders.entries()) {
+        // Remove orders that don't match current market tokenIds
+        if (
+          localOrder.tokenId !== yesTokenId &&
+          localOrder.tokenId !== noTokenId
+        ) {
+          ordersToRemove.push(orderId);
+          this.logger.debug(
+            "Removing local pending order from previous market",
+            {
+              orderId,
+              tokenId: localOrder.tokenId,
+              currentMarket: { yesTokenId, noTokenId },
+            }
+          );
+        }
+      }
+      for (const orderId of ordersToRemove) {
+        this.localPendingOrders.delete(orderId);
+      }
+
+      // Now process remaining orders (only current market orders)
+      for (const [orderId, localOrder] of this.localPendingOrders.entries()) {
+        // Double-check: Only include orders for current market (should already be filtered above)
+        if (
+          localOrder.tokenId === yesTokenId ||
+          localOrder.tokenId === noTokenId
+        ) {
+          // Remove stale orders (older than 30 seconds)
+          if (now - localOrder.submittedAt > maxPendingAge) {
+            this.localPendingOrders.delete(orderId);
+            this.logger.debug("Removing stale local pending order", {
+              orderId,
+              tokenId: localOrder.tokenId,
+              age: now - localOrder.submittedAt,
+            });
+            continue;
+          }
+
+          // Check if this order is already in activeOrders from API
+          const alreadyInAPI = activeOrders.some((apiOrder: any) => {
+            const apiOrderId =
+              apiOrder.orderID || apiOrder.orderId || apiOrder.id;
+            return apiOrderId === orderId;
+          });
+
+          // If not in API yet, add it to activeOrders so strategy sees it
+          if (!alreadyInAPI) {
+            activeOrders.push({
+              tokenID: localOrder.tokenId,
+              tokenId: localOrder.tokenId,
+              asset: localOrder.tokenId,
+              orderID: orderId,
+              orderId: orderId,
+              id: orderId,
+              price: localOrder.price,
+              limitPrice: localOrder.price,
+              orderPrice: localOrder.price,
+              size: localOrder.size,
+              amount: localOrder.size,
+              quantity: localOrder.size,
+            });
+            this.logger.debug("Including local pending order in activeOrders", {
+              orderId,
+              tokenId: localOrder.tokenId,
+              age: now - localOrder.submittedAt,
+            });
+          } else {
+            // Order is now in API, remove from local tracking
+            this.localPendingOrders.delete(orderId);
+            this.logger.debug("Removed local pending order (now in API)", {
+              orderId,
+              tokenId: localOrder.tokenId,
+            });
+          }
+        }
       }
 
       const context: StrategyContext = {
@@ -575,7 +710,11 @@ class PolymarketTradingBot {
       const decision = this.strategy.execute(context);
 
       // Handle both single decision and array of decisions
-      const decisions = Array.isArray(decision) ? decision : decision ? [decision] : [];
+      const decisions = Array.isArray(decision)
+        ? decision
+        : decision
+        ? [decision]
+        : [];
 
       if (decisions.length === 0) {
         this.logger.info("Strategy returned no action", {
@@ -594,31 +733,43 @@ class PolymarketTradingBot {
           const orderTokenId = order.tokenID || order.tokenId || order.asset;
           return orderTokenId === yesTokenId || orderTokenId === noTokenId;
         });
-        
+
         // Refresh active orders list to get any new orders that might have been added
         // (though we already have them from before strategy execution)
         try {
-          const refreshedActiveOrders = await this.orderExecutor.getActiveOrders();
+          const refreshedActiveOrders =
+            await this.orderExecutor.getActiveOrders();
           // Merge with existing activeOrders, avoiding duplicates
-          const existingOrderIds = new Set(activeOrdersForValidation.map((o: any) => o.orderID || o.orderId));
+          const existingOrderIds = new Set(
+            activeOrdersForValidation.map((o: any) => o.orderID || o.orderId)
+          );
           for (const order of refreshedActiveOrders) {
             const orderTokenId = order.tokenID || order.tokenId || order.asset;
-            if ((orderTokenId === yesTokenId || orderTokenId === noTokenId) && 
-                !existingOrderIds.has(order.orderID || order.orderId)) {
+            if (
+              (orderTokenId === yesTokenId || orderTokenId === noTokenId) &&
+              !existingOrderIds.has(order.orderID || order.orderId)
+            ) {
               activeOrdersForValidation.push(order);
             }
           }
         } catch (error) {
-          this.logger.warn("Failed to refresh active orders, using cached list", {
-            error: error instanceof Error ? error.message : String(error),
-          });
+          this.logger.warn(
+            "Failed to refresh active orders, using cached list",
+            {
+              error: error instanceof Error ? error.message : String(error),
+            }
+          );
           // Continue with existing activeOrdersForValidation
         }
 
         // Track submitted orders in this cycle to prevent duplicates within same cycle
         const submittedInThisCycle = new Set<string>();
         // Track orders submitted in this cycle with their costs for budget calculation
-        const ordersSubmittedInCycle: Array<{ tokenId: string; price: number; size: number }> = [];
+        const ordersSubmittedInCycle: Array<{
+          tokenId: string;
+          price: number;
+          size: number;
+        }> = [];
 
         for (const d of decisions) {
           if (!d || d.action === "HOLD") {
@@ -626,7 +777,9 @@ class PolymarketTradingBot {
           }
 
           // Validate decision before processing
-          if (!this.validateDecision(d, yesTokenId, noTokenId, yesPrice, noPrice)) {
+          if (
+            !this.validateDecision(d, yesTokenId, noTokenId, yesPrice, noPrice)
+          ) {
             continue;
           }
 
@@ -641,7 +794,8 @@ class PolymarketTradingBot {
           // Check if we already have an active order for this token (prevents duplicate orders)
           const hasActiveOrderForToken = activeOrdersForValidation.some(
             (order: any) => {
-              const orderTokenId = order.tokenID || order.tokenId || order.asset;
+              const orderTokenId =
+                order.tokenID || order.tokenId || order.asset;
               return orderTokenId === d.tokenId;
             }
           );
@@ -657,21 +811,33 @@ class PolymarketTradingBot {
           }
 
           if (hasActiveOrderForToken) {
-            this.logger.info("Active order already exists for this token, skipping", {
-              tokenId: d.tokenId,
-              activeOrders: activeOrdersForValidation.length,
-              matchingOrders: activeOrdersForValidation.filter((o: any) => {
-                const orderTokenId = o.tokenID || o.tokenId || o.asset;
-                return orderTokenId === d.tokenId;
-              }).length,
-              reason: d.reason,
-            });
+            this.logger.info(
+              "Active order already exists for this token, skipping",
+              {
+                tokenId: d.tokenId,
+                activeOrders: activeOrdersForValidation.length,
+                matchingOrders: activeOrdersForValidation.filter((o: any) => {
+                  const orderTokenId = o.tokenID || o.tokenId || o.asset;
+                  return orderTokenId === d.tokenId;
+                }).length,
+                reason: d.reason,
+              }
+            );
             continue;
           }
 
           // Validate budget before submitting order (includes active orders and in-cycle orders)
           // Use currentMarketPositions (already filtered) instead of full positions array
-          if (!this.validateBudget(d, currentMarketPositions, yesPrice, noPrice, activeOrdersForValidation, ordersSubmittedInCycle)) {
+          if (
+            !this.validateBudget(
+              d,
+              currentMarketPositions,
+              yesPrice,
+              noPrice,
+              activeOrdersForValidation,
+              ordersSubmittedInCycle
+            )
+          ) {
             this.logger.warn("Order would exceed budget, skipping", {
               tokenId: d.tokenId,
               price: d.price,
@@ -691,7 +857,7 @@ class PolymarketTradingBot {
                 orderId,
                 reason: d.reason,
               });
-              
+
               // Track trade for CSV logging
               this.recordTrade({
                 timestamp: new Date(),
@@ -705,7 +871,7 @@ class PolymarketTradingBot {
                 status: "SUBMITTED",
                 reason: d.reason || "",
               });
-              
+
               // Mark as submitted to prevent duplicates in same cycle
               submittedInThisCycle.add(d.tokenId);
               // Track order cost for budget calculation
@@ -722,6 +888,20 @@ class PolymarketTradingBot {
                 price: d.price,
                 size: d.size,
               });
+
+              // Track locally to prevent duplicates in next cycle (API might not show it yet)
+              this.localPendingOrders.set(orderId, {
+                tokenId: d.tokenId,
+                orderId: orderId,
+                price: d.price,
+                size: d.size,
+                submittedAt: Date.now(),
+              });
+              this.logger.debug("Tracked order locally to prevent duplicates", {
+                orderId,
+                tokenId: d.tokenId,
+                localPendingCount: this.localPendingOrders.size,
+              });
             } else {
               // Track failed order
               this.recordTrade({
@@ -737,7 +917,7 @@ class PolymarketTradingBot {
                 failureReason: "Order submission returned null",
                 reason: d.reason || "",
               });
-              
+
               this.logger.warn("Order submission failed (returned null)", {
                 action: d.action,
                 tokenId: d.tokenId,
@@ -758,14 +938,20 @@ class PolymarketTradingBot {
               cost: d.price * d.size,
               orderId: null,
               status: "FAILED",
-              failureReason: orderError instanceof Error ? orderError.message : String(orderError),
+              failureReason:
+                orderError instanceof Error
+                  ? orderError.message
+                  : String(orderError),
               reason: d.reason || "",
             });
-            
+
             this.logger.error("Exception during order execution", {
               action: d.action,
               tokenId: d.tokenId,
-              error: orderError instanceof Error ? orderError.message : String(orderError),
+              error:
+                orderError instanceof Error
+                  ? orderError.message
+                  : String(orderError),
               reason: d.reason,
             });
             // Continue with next decision instead of failing entire cycle
@@ -780,24 +966,40 @@ class PolymarketTradingBot {
   }
 
   start() {
-    if (this.isRunning) {
-      this.logger.warn("Bot is already running");
-      return;
-    }
+    // if (this.isRunning) {
+    //   this.logger.warn("Bot is already running");
+    //   return;
+    // }
 
-    this.isRunning = true;
-    this.botStartTime = new Date();
-    this.cycleCount = 0;
-    this.trades = [];
-    this.logger.info(
-      `Starting bot with ${this.config.pollIntervalMs}ms polling interval`
-    );
+    // this.isRunning = true;
+    // this.botStartTime = new Date();
+    // this.cycleCount = 0;
+    // this.trades = [];
+    // this.logger.info(
+    //   `Starting bot with ${this.config.pollIntervalMs}ms polling interval`
+    // );
 
-    this.executeTradingCycle();
+    // this.executeTradingCycle();
 
-    this.intervalId = setInterval(() => {
-      this.executeTradingCycle();
-    }, this.config.pollIntervalMs);
+    // this.intervalId = setInterval(() => {
+    //   this.executeTradingCycle();
+    // }, this.config.pollIntervalMs);
+
+    // Start separate redemption checker that runs every 5 seconds
+    this.logger.info("Starting redemption checker (runs every 5 seconds)");
+    // Call immediately and handle errors
+    this.checkRedeemablePositions().catch((error) => {
+      this.logger.error("Error in initial redemption check", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    this.redeemCheckIntervalId = setInterval(() => {
+      this.checkRedeemablePositions().catch((error) => {
+        this.logger.error("Error in redemption check interval", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }, 5000); // Check every 5 seconds
   }
 
   stop() {
@@ -810,12 +1012,348 @@ class PolymarketTradingBot {
       clearInterval(this.intervalId);
       this.intervalId = null;
     }
+    if (this.redeemCheckIntervalId) {
+      clearInterval(this.redeemCheckIntervalId);
+      this.redeemCheckIntervalId = null;
+    }
 
     this.logger.info("Bot stopped");
   }
 
   /**
+   * Check for redeemable positions every 5 seconds
+   * Uses the positions API to find positions with redeemable: true
+   */
+  private async checkRedeemablePositions(): Promise<void> {
+    if (!this.relayClient || !this.clobClient) {
+      this.logger.debug(
+        "Cannot check redeemable positions - missing relayClient or clobClient",
+        {
+          hasRelayClient: !!this.relayClient,
+          hasClobClient: !!this.clobClient,
+        }
+      );
+      return; // Can't redeem without relay client
+    }
+
+    try {
+      const walletAddress = this.clobClient.orderBuilder.funderAddress;
+      if (!walletAddress) {
+        this.logger.warn("No wallet address available for redemption check");
+        return;
+      }
+
+      this.logger.debug("Checking redeemable positions for wallet", {
+        walletAddress,
+      });
+
+      // Fetch positions from the new API endpoint
+      const positions = await getUserPositions(walletAddress, this.logger);
+
+      this.logger.debug("Checking redeemable positions", {
+        totalPositions: positions.length,
+        positionsWithRedeemable: positions.filter((p) => p.redeemable === true)
+          .length,
+        positions: positions.map((p) => ({
+          asset: p.asset,
+          size: p.size,
+          redeemable: p.redeemable,
+          curPrice: p.curPrice,
+          conditionId: p.conditionId,
+          outcomeIndex: p.outcomeIndex,
+          outcome: p.outcome,
+        })),
+      });
+
+      if (positions.length === 0) {
+        this.logger.debug("No positions to check for redemption");
+        return; // No positions to check
+      }
+
+      // Filter for ALL redeemable positions (both winning and losing)
+      // Redeem any position where redeemable: true, regardless of curPrice or PnL
+      // This helps clean up position data after markets resolve
+      const redeemablePositions = positions.filter((pos) => {
+        // Skip if we've already successfully redeemed this condition + outcome
+        const conditionId = pos.conditionId;
+        const outcomeIndex = pos.outcomeIndex;
+        if (conditionId !== undefined && outcomeIndex !== undefined) {
+          const redeemKey = `${conditionId}:${outcomeIndex}`;
+          if (this.successfullyRedeemedConditions.has(redeemKey)) {
+            this.logger.debug("Skipping position - already redeemed", {
+              conditionId,
+              outcomeIndex,
+              redeemKey,
+              asset: pos.asset,
+            });
+            return false;
+          }
+        }
+
+        const isRedeemable = pos.redeemable === true;
+        const hasSize = pos.size > 0;
+        const hasConditionId = !!pos.conditionId;
+        const hasOutcomeIndex = pos.outcomeIndex !== undefined;
+
+        const shouldRedeem =
+          isRedeemable &&
+          hasSize &&
+          hasConditionId && // Must have conditionId to redeem
+          hasOutcomeIndex; // Must have outcomeIndex
+
+        if (!shouldRedeem && isRedeemable) {
+          // Log why a redeemable position is not being redeemed
+          this.logger.debug("Redeemable position filtered out", {
+            asset: pos.asset,
+            size: pos.size,
+            curPrice: pos.curPrice,
+            conditionId: pos.conditionId,
+            outcomeIndex: pos.outcomeIndex,
+            reasons: {
+              isRedeemable,
+              hasSize,
+              hasConditionId,
+              hasOutcomeIndex,
+            },
+          });
+        }
+
+        return shouldRedeem;
+      });
+
+      if (redeemablePositions.length === 0) {
+        this.logger.debug("No redeemable positions found", {
+          totalPositions: positions.length,
+          redeemableCount: positions.filter((p) => p.redeemable === true)
+            .length,
+        });
+        return; // No redeemable positions
+      }
+
+      this.logger.info("Found redeemable positions (winning and losing)", {
+        count: redeemablePositions.length,
+        positions: redeemablePositions.map((p) => ({
+          asset: p.asset,
+          size: p.size,
+          conditionId: p.conditionId,
+          outcomeIndex: p.outcomeIndex,
+          curPrice: p.curPrice,
+          cashPnl: p.cashPnl,
+          percentPnl: p.percentPnl,
+          outcome: p.outcome,
+          title: p.title,
+        })),
+      });
+
+      // Group positions by conditionId AND outcomeIndex
+      // In binary markets, both outcomes can be redeemable (one winning, one losing)
+      // We need to redeem each outcome separately
+      const positionsByConditionAndOutcome = new Map<string, any[]>();
+
+      for (const pos of redeemablePositions) {
+        const conditionId = pos.conditionId!; // We already filtered for this
+        const outcomeIndex = pos.outcomeIndex;
+        if (outcomeIndex === undefined) {
+          this.logger.warn("Skipping position without outcomeIndex", {
+            asset: pos.asset,
+            conditionId,
+            redeemable: pos.redeemable,
+          });
+          continue; // Skip positions without outcomeIndex
+        }
+
+        // Create a unique key: conditionId + outcomeIndex
+        const key = `${conditionId}:${outcomeIndex}`;
+        if (!positionsByConditionAndOutcome.has(key)) {
+          positionsByConditionAndOutcome.set(key, []);
+        }
+        positionsByConditionAndOutcome.get(key)!.push(pos);
+
+        this.logger.debug("Grouped position", {
+          asset: pos.asset,
+          conditionId,
+          outcomeIndex,
+          key,
+          groupSize: positionsByConditionAndOutcome.get(key)!.length,
+        });
+      }
+
+      this.logger.info("Grouped redeemable positions", {
+        totalGroups: positionsByConditionAndOutcome.size,
+        groups: Array.from(positionsByConditionAndOutcome.entries()).map(
+          ([key, positions]) => ({
+            key,
+            count: positions.length,
+            outcomeIndexes: positions.map((p) => p.outcomeIndex),
+            assets: positions.map((p) => p.asset),
+          })
+        ),
+      });
+
+      // Redeem positions for each conditionId + outcomeIndex combination
+      for (const [key, conditionPositions] of positionsByConditionAndOutcome) {
+        const [conditionId, outcomeIndexStr] = key.split(":");
+        const outcomeIndex = parseInt(outcomeIndexStr, 10);
+
+        // CRITICAL: Filter to only include positions with the matching outcomeIndex
+        // This ensures we don't accidentally redeem positions with different outcomeIndex values
+        const matchingPositions = conditionPositions.filter(
+          (p) => p.outcomeIndex === outcomeIndex
+        );
+
+        if (matchingPositions.length === 0) {
+          this.logger.warn("No positions found with matching outcomeIndex", {
+            conditionId,
+            outcomeIndex,
+            key,
+            allPositions: conditionPositions.map((p) => ({
+              asset: p.asset,
+              outcomeIndex: p.outcomeIndex,
+            })),
+          });
+          continue;
+        }
+
+        const totalSize = matchingPositions.reduce((sum, p) => sum + p.size, 0);
+
+        // Create a unique key for tracking: conditionId + outcomeIndex
+        const redeemKey = `${conditionId}:${outcomeIndex}`;
+
+        // Skip if we've already successfully redeemed this condition + outcome
+        if (this.successfullyRedeemedConditions.has(redeemKey)) {
+          this.logger.info("Skipping redeem - already successfully redeemed", {
+            conditionId,
+            outcomeIndex,
+            redeemKey,
+            totalSize,
+            positionsCount: matchingPositions.length,
+          });
+          continue;
+        }
+
+        // Check if we already tried to redeem this condition + outcome recently (within 1 minute for faster retries)
+        const lastRedeemAttempt = this.lastRedeemCheck.get(redeemKey) || 0;
+        const now = Date.now();
+        const timeSinceLastAttempt = now - lastRedeemAttempt;
+        if (timeSinceLastAttempt < 60 * 1000) {
+          this.logger.info("Skipping redeem - attempted recently", {
+            conditionId,
+            outcomeIndex,
+            redeemKey,
+            lastAttempt: new Date(lastRedeemAttempt).toISOString(),
+            timeSinceLastAttempt: `${Math.round(timeSinceLastAttempt / 1000)}s`,
+            totalSize,
+            positionsCount: matchingPositions.length,
+          });
+          continue;
+        }
+
+        // Log that we're proceeding with redemption
+        this.logger.debug(
+          "Proceeding with redemption - not in success set and cooldown passed",
+          {
+            conditionId,
+            outcomeIndex,
+            redeemKey,
+            inSuccessSet: this.successfullyRedeemedConditions.has(redeemKey),
+            lastRedeemAttempt:
+              lastRedeemAttempt > 0
+                ? new Date(lastRedeemAttempt).toISOString()
+                : "never",
+            timeSinceLastAttempt:
+              lastRedeemAttempt > 0
+                ? `${Math.round(timeSinceLastAttempt / 1000)}s`
+                : "N/A",
+          }
+        );
+
+        this.logger.info("Redeeming positions", {
+          conditionId,
+          outcomeIndex,
+          totalSize,
+          positionsCount: matchingPositions.length,
+          positions: matchingPositions.map((p) => ({
+            asset: p.asset,
+            size: p.size,
+            outcome: p.outcome,
+            outcomeIndex: p.outcomeIndex,
+            curPrice: p.curPrice,
+          })),
+        });
+
+        try {
+          // Check if already successfully redeemed BEFORE attempting
+          const redeemKey = `${conditionId}:${outcomeIndex}`;
+          const wasAlreadyRedeemed = this.successfullyRedeemedConditions.has(redeemKey);
+          
+          if (wasAlreadyRedeemed) {
+            this.logger.info("Skipping redeem - already successfully redeemed", {
+              conditionId,
+              outcomeIndex,
+              redeemKey,
+              totalSize,
+            });
+            continue;
+          }
+          
+          await redeemPositions(
+            this.relayClient,
+            {
+              conditionId,
+              outcomeIndex,
+            },
+            this.logger
+          );
+
+          // Only mark as successfully redeemed if redeemPositions() completed without throwing
+          // Mark as successfully redeemed (use conditionId + outcomeIndex as key)
+          this.successfullyRedeemedConditions.add(redeemKey);
+          this.lastRedeemCheck.set(redeemKey, now);
+          this.logger.info(
+            "Successfully redeemed positions and added to success set",
+            {
+              conditionId,
+              outcomeIndex,
+              redeemKey,
+              totalSize,
+              successSetSize: this.successfullyRedeemedConditions.size,
+              wasAlreadyInSet: false, // We checked before, so this should always be false
+            }
+          );
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+
+          const redeemKey = `${conditionId}:${outcomeIndex}`;
+          this.logger.error("Failed to redeem positions", {
+            conditionId,
+            outcomeIndex,
+            redeemKey,
+            error: errorMessage,
+            totalSize,
+          });
+
+          // Update last attempt (shorter cooldown for timeout errors)
+          const isTimeoutError =
+            errorMessage.includes("timeout") ||
+            errorMessage.includes("Timeout");
+          const cooldownMs = isTimeoutError ? 30 * 1000 : 60 * 1000; // 30s for timeout, 60s for other errors
+          this.lastRedeemCheck.set(redeemKey, now - (60 * 1000 - cooldownMs));
+        }
+      }
+    } catch (error) {
+      this.logger.error("Error checking redeemable positions", {
+        error: error instanceof Error ? error.message : String(error),
+        errorStack: error instanceof Error ? error.stack : undefined,
+        errorType:
+          error instanceof Error ? error.constructor.name : typeof error,
+      });
+    }
+  }
+
+  /**
    * Handle redemption of winning positions when market is closed
+   * (Legacy method, kept for backward compatibility)
    */
   private async handleMarketRedemption(
     market: any,
@@ -835,8 +1373,10 @@ class PolymarketTradingBot {
       // Use 0.95 threshold instead of 0.99 to catch more resolved markets
       // Also check if one side is significantly higher than the other
       const priceDiff = Math.abs(yesPrice.midPrice - noPrice.midPrice);
-      const yesWins = yesPrice.midPrice >= 0.95 && yesPrice.midPrice > noPrice.midPrice;
-      const noWins = noPrice.midPrice >= 0.95 && noPrice.midPrice > yesPrice.midPrice;
+      const yesWins =
+        yesPrice.midPrice >= 0.95 && yesPrice.midPrice > noPrice.midPrice;
+      const noWins =
+        noPrice.midPrice >= 0.95 && noPrice.midPrice > yesPrice.midPrice;
 
       this.logger.debug("Checking market resolution", {
         yesPrice: yesPrice.midPrice,
@@ -867,17 +1407,14 @@ class PolymarketTradingBot {
         outcomeIndex,
       });
 
-      // Find redeemable positions (prefer redeemable field, fallback to winning outcome)
-      // IMPORTANT: Only redeem WINNING positions (curPrice >= 0.95)
-      // Both winning and losing positions can be marked as redeemable, but we only want winning ones
+      // Find redeemable positions - redeem ALL positions where redeemable: true
+      // This helps clean up position data after markets resolve
       let redeemablePositions = positions.filter(
-        (pos) => 
-          pos.redeemable === true && 
-          pos.size > 0 && 
-          (pos.curPrice !== undefined && pos.curPrice >= 0.95) // Only winning positions
+        (pos) => pos.redeemable === true && pos.size > 0
       );
 
-      // If no explicitly redeemable winning positions, fall back to finding winning positions by token
+      // If no explicitly redeemable positions, fall back to finding winning positions by token
+      // (for backward compatibility with old logic)
       if (redeemablePositions.length === 0) {
         redeemablePositions = positions.filter(
           (pos) => pos.asset === winningTokenId && pos.size > 0
@@ -887,9 +1424,11 @@ class PolymarketTradingBot {
       if (redeemablePositions.length === 0) {
         this.logger.info("No redeemable positions found", {
           totalPositions: positions.length,
-          positionsWithSize: positions.filter(p => p.size > 0).length,
-          positionsMarkedRedeemable: positions.filter(p => p.redeemable === true).length,
-          allPositions: positions.map(p => ({
+          positionsWithSize: positions.filter((p) => p.size > 0).length,
+          positionsMarkedRedeemable: positions.filter(
+            (p) => p.redeemable === true
+          ).length,
+          allPositions: positions.map((p) => ({
             asset: p.asset,
             size: p.size,
             redeemable: p.redeemable,
@@ -902,7 +1441,7 @@ class PolymarketTradingBot {
 
       this.logger.info("Found redeemable positions", {
         count: redeemablePositions.length,
-        positions: redeemablePositions.map(p => ({
+        positions: redeemablePositions.map((p) => ({
           asset: p.asset,
           size: p.size,
           conditionId: p.conditionId,
@@ -917,11 +1456,12 @@ class PolymarketTradingBot {
       // Group positions by conditionId
       const positionsByCondition = new Map<string, any[]>();
       const positionsWithoutConditionId: any[] = [];
-      
+
       for (const pos of redeemablePositions) {
         // Try multiple field names for conditionId
-        let conditionId = pos.conditionId || pos.condition_id || pos.conditionID;
-        
+        let conditionId =
+          pos.conditionId || pos.condition_id || pos.conditionID;
+
         // If conditionId is still missing, try to extract from market or use a fallback
         // Note: In Polymarket, conditionId is typically derived from the market
         // For now, we'll log and skip positions without conditionId
@@ -936,17 +1476,20 @@ class PolymarketTradingBot {
             });
           } else {
             positionsWithoutConditionId.push(pos);
-            this.logger.warn("Position missing conditionId and market doesn't have it", {
-              asset: pos.asset,
-              size: pos.size,
-              redeemable: pos.redeemable,
-              positionKeys: Object.keys(pos),
-              marketId: market.id,
-            });
+            this.logger.warn(
+              "Position missing conditionId and market doesn't have it",
+              {
+                asset: pos.asset,
+                size: pos.size,
+                redeemable: pos.redeemable,
+                positionKeys: Object.keys(pos),
+                marketId: market.id,
+              }
+            );
             continue;
           }
         }
-        
+
         if (conditionId) {
           if (!positionsByCondition.has(conditionId)) {
             positionsByCondition.set(conditionId, []);
@@ -956,14 +1499,17 @@ class PolymarketTradingBot {
       }
 
       if (positionsWithoutConditionId.length > 0) {
-        this.logger.warn("Some redeemable positions missing conditionId, cannot redeem", {
-          count: positionsWithoutConditionId.length,
-          positions: positionsWithoutConditionId.map(p => ({ 
-            asset: p.asset, 
-            size: p.size,
-            redeemable: p.redeemable,
-          })),
-        });
+        this.logger.warn(
+          "Some redeemable positions missing conditionId, cannot redeem",
+          {
+            count: positionsWithoutConditionId.length,
+            positions: positionsWithoutConditionId.map((p) => ({
+              asset: p.asset,
+              size: p.size,
+              redeemable: p.redeemable,
+            })),
+          }
+        );
       }
 
       if (positionsByCondition.size === 0) {
@@ -976,8 +1522,11 @@ class PolymarketTradingBot {
 
       // Redeem positions for each conditionId
       for (const [conditionId, conditionPositions] of positionsByCondition) {
-        const totalSize = conditionPositions.reduce((sum, p) => sum + p.size, 0);
-        
+        const totalSize = conditionPositions.reduce(
+          (sum, p) => sum + p.size,
+          0
+        );
+
         // Skip if we've already successfully redeemed this condition
         if (this.successfullyRedeemedConditions.has(conditionId)) {
           this.logger.debug("Skipping redeem - already successfully redeemed", {
@@ -986,7 +1535,7 @@ class PolymarketTradingBot {
           });
           continue;
         }
-        
+
         // Check if we already tried to redeem this condition recently (within 5 minutes)
         const lastRedeemAttempt = this.lastRedeemCheck.get(conditionId) || 0;
         const now = Date.now();
@@ -1009,12 +1558,13 @@ class PolymarketTradingBot {
 
         try {
           // Use outcomeIndex from position if available, otherwise use determined index
-          const posOutcomeIndex = conditionPositions[0]?.outcomeIndex ?? outcomeIndex;
-          
+          const posOutcomeIndex =
+            conditionPositions[0]?.outcomeIndex ?? outcomeIndex;
+
           if (!posOutcomeIndex && posOutcomeIndex !== 0) {
             this.logger.warn("Cannot redeem: missing outcomeIndex", {
               conditionId,
-              positions: conditionPositions.map(p => ({
+              positions: conditionPositions.map((p) => ({
                 asset: p.asset,
                 size: p.size,
                 outcomeIndex: p.outcomeIndex,
@@ -1022,13 +1572,24 @@ class PolymarketTradingBot {
             });
             continue;
           }
-          
+
           this.logger.info("Calling redeemPositions", {
             conditionId,
             outcomeIndex: posOutcomeIndex,
             totalSize,
+            hasRelayClient: !!this.relayClient,
+            relayClientType: typeof this.relayClient,
+            hasExecuteMethod: this.relayClient && typeof this.relayClient.execute === 'function',
           });
-          
+
+          if (!this.relayClient) {
+            throw new Error("Relay client is null or undefined, cannot redeem positions");
+          }
+
+          if (typeof this.relayClient.execute !== 'function') {
+            throw new Error(`Relay client execute method not available. Type: ${typeof this.relayClient}`);
+          }
+
           await redeemPositions(
             this.relayClient,
             {
@@ -1047,15 +1608,47 @@ class PolymarketTradingBot {
             totalSize,
           });
         } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          const errorStack = error instanceof Error ? error.stack : undefined;
+
+          // Get outcomeIndex for logging (use the one we tried to redeem)
+          const attemptedOutcomeIndex =
+            conditionPositions[0]?.outcomeIndex ?? outcomeIndex;
+
           this.logger.error("Failed to redeem positions", {
             conditionId,
-            outcomeIndex,
-            error: error instanceof Error ? error.message : String(error),
-            errorStack: error instanceof Error ? error.stack : undefined,
+            outcomeIndex: attemptedOutcomeIndex,
+            error: errorMessage,
+            errorStack: errorStack,
+            errorType:
+              error instanceof Error ? error.constructor.name : typeof error,
+            totalSize,
+            positionsCount: conditionPositions.length,
           });
-          // Still update last attempt to avoid spamming, but use shorter delay for retry
-          // If it's a real error (not just "not ready yet"), we should retry sooner
-          this.lastRedeemCheck.set(conditionId, now);
+
+          // Update last attempt to avoid spamming
+          // Use shorter cooldown (1 minute) for timeout errors so we can retry sooner
+          // Use longer cooldown (5 minutes) for other errors
+          const isTimeoutError =
+            errorMessage.includes("timeout") ||
+            errorMessage.includes("Timeout");
+          const cooldownMs = isTimeoutError ? 60 * 1000 : 5 * 60 * 1000;
+          this.lastRedeemCheck.set(
+            conditionId,
+            now - (5 * 60 * 1000 - cooldownMs)
+          ); // Adjust so next check is after cooldown
+
+          // Don't mark as successfully redeemed if there was an error
+          // The transaction might have failed or timed out
+          this.logger.warn(
+            "Redemption attempt failed, will retry after cooldown",
+            {
+              conditionId,
+              cooldownMinutes: cooldownMs / (60 * 1000),
+              isTimeoutError,
+            }
+          );
         }
       }
     } catch (error) {
@@ -1076,8 +1669,16 @@ class PolymarketTradingBot {
     noPrice: any
   ): boolean {
     // Check required fields
-    if (!decision || !decision.action || !decision.tokenId || decision.price === undefined || decision.size === undefined) {
-      this.logger.warn("Invalid decision: missing required fields", { decision });
+    if (
+      !decision ||
+      !decision.action ||
+      !decision.tokenId ||
+      decision.price === undefined ||
+      decision.size === undefined
+    ) {
+      this.logger.warn("Invalid decision: missing required fields", {
+        decision,
+      });
       return false;
     }
 
@@ -1158,7 +1759,11 @@ class PolymarketTradingBot {
     yesPrice: any,
     noPrice: any,
     activeOrders: any[] = [],
-    ordersSubmittedInCycle: Array<{ tokenId: string; price: number; size: number }> = []
+    ordersSubmittedInCycle: Array<{
+      tokenId: string;
+      price: number;
+      size: number;
+    }> = []
   ): boolean {
     if (!this.config.maxBudgetPerPool) {
       return true; // No budget limit configured
@@ -1185,17 +1790,20 @@ class PolymarketTradingBot {
       // Handle different field name variations (tokenID, tokenId, etc.)
       const orderTokenId = order.tokenID || order.tokenId || order.asset;
       if (!orderTokenId) continue; // Skip if we can't identify the token
-      
+
       // Only count orders for current market tokens
-      if (orderTokenId !== yesPrice.tokenId && orderTokenId !== noPrice.tokenId) {
+      if (
+        orderTokenId !== yesPrice.tokenId &&
+        orderTokenId !== noPrice.tokenId
+      ) {
         continue; // Skip orders from other markets
       }
-      
+
       const tokenPrice = orderTokenId === yesPrice.tokenId ? yesPrice : noPrice;
       // Use order price if available (check multiple possible field names)
       const orderPrice = order.price || order.limitPrice || order.orderPrice;
       const orderSize = order.size || order.amount || order.quantity;
-      
+
       // If order has price and size, use them; otherwise estimate from current market
       if (orderPrice && orderSize) {
         totalSpent += orderPrice * orderSize;
@@ -1211,7 +1819,8 @@ class PolymarketTradingBot {
 
     // Add cost of orders submitted in this cycle (before they become active)
     for (const cycleOrder of ordersSubmittedInCycle) {
-      const tokenPrice = cycleOrder.tokenId === yesPrice.tokenId ? yesPrice : noPrice;
+      const tokenPrice =
+        cycleOrder.tokenId === yesPrice.tokenId ? yesPrice : noPrice;
       totalSpent += cycleOrder.price * cycleOrder.size;
     }
 
@@ -1221,24 +1830,33 @@ class PolymarketTradingBot {
 
     if (newTotal > this.config.maxBudgetPerPool) {
       this.logger.warn("Budget validation failed", {
-        filledPositionsCost: currentMarketPositions.reduce((sum, pos) => {
-          const tokenPrice = pos.asset === yesPrice.tokenId ? yesPrice : noPrice;
-          return sum + pos.size * tokenPrice.askPrice;
-        }, 0).toFixed(2),
-        activeOrdersCost: activeOrders.reduce((sum, order) => {
-          const orderTokenId = order.tokenID || order.tokenId || order.asset;
-          if (!orderTokenId) return sum;
-          const tokenPrice = orderTokenId === yesPrice.tokenId ? yesPrice : noPrice;
-          const orderPrice = order.price || order.limitPrice || order.orderPrice;
-          const orderSize = order.size || order.amount || order.quantity;
-          if (orderPrice && orderSize) {
-            return sum + orderPrice * orderSize;
-          } else if (orderSize) {
-            return sum + tokenPrice.askPrice * orderSize;
-          }
-          return sum + tokenPrice.askPrice * 10;
-        }, 0).toFixed(2),
-        cycleOrdersCost: ordersSubmittedInCycle.reduce((sum, o) => sum + o.price * o.size, 0).toFixed(2),
+        filledPositionsCost: currentMarketPositions
+          .reduce((sum, pos) => {
+            const tokenPrice =
+              pos.asset === yesPrice.tokenId ? yesPrice : noPrice;
+            return sum + pos.size * tokenPrice.askPrice;
+          }, 0)
+          .toFixed(2),
+        activeOrdersCost: activeOrders
+          .reduce((sum, order) => {
+            const orderTokenId = order.tokenID || order.tokenId || order.asset;
+            if (!orderTokenId) return sum;
+            const tokenPrice =
+              orderTokenId === yesPrice.tokenId ? yesPrice : noPrice;
+            const orderPrice =
+              order.price || order.limitPrice || order.orderPrice;
+            const orderSize = order.size || order.amount || order.quantity;
+            if (orderPrice && orderSize) {
+              return sum + orderPrice * orderSize;
+            } else if (orderSize) {
+              return sum + tokenPrice.askPrice * orderSize;
+            }
+            return sum + tokenPrice.askPrice * 10;
+          }, 0)
+          .toFixed(2),
+        cycleOrdersCost: ordersSubmittedInCycle
+          .reduce((sum, o) => sum + o.price * o.size, 0)
+          .toFixed(2),
         currentSpent: totalSpent.toFixed(2),
         orderCost: orderCost.toFixed(2),
         newTotal: newTotal.toFixed(2),
@@ -1276,7 +1894,7 @@ class PolymarketTradingBot {
     }
 
     const side = trade.tokenId === this.yesTokenId ? "YES" : "NO";
-    
+
     // Calculate cumulative stats
     let yesQty = 0;
     let yesCost = 0;
@@ -1288,7 +1906,7 @@ class PolymarketTradingBot {
     for (const t of this.trades) {
       const tSide = t.tokenId === this.yesTokenId ? "YES" : "NO";
       const isBuy = t.action === "BUY_YES" || t.action === "BUY_NO";
-      
+
       if (tSide === "YES" && isBuy && t.status === "FILLED") {
         yesQty += t.filledSize || t.size;
         yesCost += (t.filledPrice || t.price) * (t.filledSize || t.size);
@@ -1306,12 +1924,20 @@ class PolymarketTradingBot {
       if (isBuy) {
         if (side === "YES") {
           yesQty += trade.filledSize || trade.size;
-          yesCost += (trade.filledPrice || trade.price) * (trade.filledSize || trade.size);
-          totalSpent += (trade.filledPrice || trade.price) * (trade.filledSize || trade.size);
+          yesCost +=
+            (trade.filledPrice || trade.price) *
+            (trade.filledSize || trade.size);
+          totalSpent +=
+            (trade.filledPrice || trade.price) *
+            (trade.filledSize || trade.size);
         } else {
           noQty += trade.filledSize || trade.size;
-          noCost += (trade.filledPrice || trade.price) * (trade.filledSize || trade.size);
-          totalSpent += (trade.filledPrice || trade.price) * (trade.filledSize || trade.size);
+          noCost +=
+            (trade.filledPrice || trade.price) *
+            (trade.filledSize || trade.size);
+          totalSpent +=
+            (trade.filledPrice || trade.price) *
+            (trade.filledSize || trade.size);
         }
       }
     }
@@ -1355,7 +1981,11 @@ class PolymarketTradingBot {
    * @param yesPrice Optional current YES price for accurate PnL calculation
    * @param noPrice Optional current NO price for accurate PnL calculation
    */
-  private writeSummaryCSV(positions?: any[], yesPrice?: any, noPrice?: any): void {
+  private writeSummaryCSV(
+    positions?: any[],
+    yesPrice?: any,
+    noPrice?: any
+  ): void {
     if (!this.botStartTime || !this.currentMarket) {
       return;
     }
@@ -1430,7 +2060,8 @@ class PolymarketTradingBot {
     // Calculate pair cost from average prices
     const yesAvgPrice = yesSize > 0 ? yesCost / yesSize : 0;
     const noAvgPrice = noSize > 0 ? noCost / noSize : 0;
-    const pairCost = yesAvgPrice > 0 && noAvgPrice > 0 ? yesAvgPrice + noAvgPrice : 0;
+    const pairCost =
+      yesAvgPrice > 0 && noAvgPrice > 0 ? yesAvgPrice + noAvgPrice : 0;
 
     const budgetLimit = this.config.maxBudgetPerPool || 0;
     const budgetUsed = totalSpent;
@@ -1483,18 +2114,56 @@ class PolymarketTradingBot {
    * Update trade status based on positions (check if orders were filled)
    * This should be called periodically to update trade records
    */
-  private async updateTradeStatuses(positions: any[], yesPrice: any, noPrice: any): Promise<void> {
+  private async updateTradeStatuses(
+    positions: any[],
+    yesPrice: any,
+    noPrice: any
+  ): Promise<void> {
     // This is a simplified version - in production, you'd want to track order fills more accurately
     // For now, we'll update trades that are SUBMITTED but have corresponding positions
+
+    // Clean up local pending orders that are likely filled (position size increased)
+    // This helps prevent stale local orders from blocking new decisions
+    if (this.orderExecutor) {
+      for (const [orderId, localOrder] of this.localPendingOrders.entries()) {
+        const position = positions.find((p) => p.asset === localOrder.tokenId);
+        // If position exists and has size, the order might be filled
+        // Remove from local tracking (API should show it if it's still active)
+        if (position && position.size > 0) {
+          // Check if order is still in API - if not, it's likely filled
+          try {
+            const activeOrders = await this.orderExecutor.getActiveOrders();
+            const stillActive = activeOrders.some((apiOrder: any) => {
+              const apiOrderId =
+                apiOrder.orderID || apiOrder.orderId || apiOrder.id;
+              return apiOrderId === orderId;
+            });
+            if (!stillActive) {
+              // Order not in API and position exists - likely filled, remove from local tracking
+              this.localPendingOrders.delete(orderId);
+              this.logger.debug("Removed local pending order (likely filled)", {
+                orderId,
+                tokenId: localOrder.tokenId,
+                positionSize: position.size,
+              });
+            }
+          } catch (error) {
+            // If API call fails, keep the local order (safer to keep than remove)
+          }
+        }
+      }
+    }
+
     for (const trade of this.trades) {
       if (trade.status === "SUBMITTED" && trade.orderId) {
         const position = positions.find((p) => p.asset === trade.tokenId);
         const isBuy = trade.action === "BUY_YES" || trade.action === "BUY_NO";
-        
+
         if (isBuy && position && position.size > 0) {
           // Order likely filled - update status
           // Note: This is a heuristic - ideally you'd check order status from exchange
-          const tokenPrice = trade.tokenId === yesPrice.tokenId ? yesPrice : noPrice;
+          const tokenPrice =
+            trade.tokenId === yesPrice.tokenId ? yesPrice : noPrice;
           trade.status = "FILLED";
           trade.filledPrice = trade.price; // Use order price as estimate
           trade.filledSize = trade.size; // Use order size as estimate
@@ -1506,7 +2175,7 @@ class PolymarketTradingBot {
   async shutdown() {
     this.logger.info("Shutting down bot...");
     this.stop();
-    
+
     // Write summary CSV on shutdown (try to get current positions and prices for accurate PnL)
     try {
       if (this.clobClient && this.yesTokenId && this.noTokenId) {
@@ -1525,7 +2194,7 @@ class PolymarketTradingBot {
       // Still write summary without current prices
       this.writeSummaryCSV();
     }
-    
+
     this.logger.info("Bot shutdown complete");
   }
 }

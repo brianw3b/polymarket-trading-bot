@@ -33,6 +33,19 @@ export interface Position {
   title?: string;
   slug?: string;
   outcome?: string;
+  // Additional fields from the new API response
+  avgPrice?: number;
+  currentValue?: number;
+  cashPnl?: number;
+  percentPnl?: number;
+  proxyWallet?: string;
+  eventId?: string;
+  eventSlug?: string;
+  oppositeAsset?: string;
+  oppositeOutcome?: string;
+  endDate?: string;
+  negativeRisk?: boolean;
+  mergeable?: boolean;
 }
 
 /**
@@ -330,6 +343,8 @@ export async function getUserPositions(
   logger: Logger
 ): Promise<Position[]> {
   try {
+    // Use the same API endpoint and parameters as the frontend route.ts
+    // https://data-api.polymarket.com/positions?user=<address>&sizeThreshold=0.01&limit=500
     const params = new URLSearchParams({
       user: userAddress,
       sizeThreshold: "0.01",
@@ -340,8 +355,12 @@ export async function getUserPositions(
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-    const response = await fetch(`${DATA_API}/positions?${params}`, {
+    const apiUrl = `${DATA_API}/positions?${params}`;
+    const response = await fetch(apiUrl, {
       signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+      },
     }).finally(() => clearTimeout(timeoutId));
 
     if (!response.ok) {
@@ -351,13 +370,17 @@ export async function getUserPositions(
     const data = await response.json();
 
     if (!Array.isArray(data)) {
+      logger.warn("Positions API returned non-array response", { data });
       return [];
     }
 
-    return data.map((pos) => ({
+    // Map the response to Position interface
+    // The API returns data in the format: { asset, size, conditionId, outcomeIndex, redeemable, curPrice, etc. }
+    return data.map((pos: any) => ({
       asset: pos.asset,
       size: parseFloat(pos.size) || 0,
-      side: pos.side || pos.outcome || "YES", // Use outcome if side not available
+      // Determine side from outcome: "Up"/"YES"/"For" = YES, "Down"/"NO"/"Against" = NO
+      side: pos.outcome === "Up" || pos.outcome === "YES" || pos.outcome === "For" ? "YES" : "NO",
       conditionId: pos.conditionId || pos.condition_id || pos.conditionID,
       outcomeIndex: pos.outcomeIndex !== undefined 
         ? pos.outcomeIndex 
@@ -365,11 +388,24 @@ export async function getUserPositions(
           ? pos.outcome_index 
           : undefined),
       redeemable: pos.redeemable !== undefined ? Boolean(pos.redeemable) : false,
-      // Include additional fields that might be useful
+      // Include additional fields from the API response
       curPrice: pos.curPrice !== undefined ? parseFloat(pos.curPrice) : undefined,
       title: pos.title,
       slug: pos.slug,
       outcome: pos.outcome,
+      // Additional fields that might be useful
+      avgPrice: pos.avgPrice !== undefined ? parseFloat(pos.avgPrice) : undefined,
+      currentValue: pos.currentValue !== undefined ? parseFloat(pos.currentValue) : undefined,
+      cashPnl: pos.cashPnl !== undefined ? parseFloat(pos.cashPnl) : undefined,
+      percentPnl: pos.percentPnl !== undefined ? parseFloat(pos.percentPnl) : undefined,
+      proxyWallet: pos.proxyWallet,
+      eventId: pos.eventId,
+      eventSlug: pos.eventSlug,
+      oppositeAsset: pos.oppositeAsset,
+      oppositeOutcome: pos.oppositeOutcome,
+      endDate: pos.endDate,
+      negativeRisk: pos.negativeRisk,
+      mergeable: pos.mergeable,
     }));
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {

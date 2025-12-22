@@ -42,7 +42,8 @@ import { TokenPrice, Position } from "../utils/marketData";
  */
 export class LadderScaleStrategy extends TradingStrategy {
   name = "ladderScale";
-  description = "Share-based dip-scale / hedge strategy with reversal trigger and ladder orders";
+  description =
+    "Share-based dip-scale / hedge strategy with reversal trigger and ladder orders";
 
   // Track entry prices with sizes for weighted averages (only successful orders)
   private higherEntries: Array<{ price: number; size: number }> = [];
@@ -60,7 +61,8 @@ export class LadderScaleStrategy extends TradingStrategy {
   }
 
   execute(context: StrategyContext): TradingDecision | null {
-    const { yesTokenPrice, noTokenPrice, positions, config, timeUntilEnd } = context;
+    const { yesTokenPrice, noTokenPrice, positions, config, timeUntilEnd } =
+      context;
 
     if (!yesTokenPrice || !noTokenPrice) {
       return null;
@@ -68,10 +70,18 @@ export class LadderScaleStrategy extends TradingStrategy {
 
     // Determine which leg is higher
     const yesIsHigher = yesTokenPrice.askPrice >= noTokenPrice.askPrice;
-    const higherPrice = yesIsHigher ? yesTokenPrice.askPrice : noTokenPrice.askPrice;
-    const lowerPrice = yesIsHigher ? noTokenPrice.askPrice : yesTokenPrice.askPrice;
-    const higherTokenId = yesIsHigher ? yesTokenPrice.tokenId : noTokenPrice.tokenId;
-    const lowerTokenId = yesIsHigher ? noTokenPrice.tokenId : yesTokenPrice.tokenId;
+    const higherPrice = yesIsHigher
+      ? yesTokenPrice.askPrice
+      : noTokenPrice.askPrice;
+    const lowerPrice = yesIsHigher
+      ? noTokenPrice.askPrice
+      : yesTokenPrice.askPrice;
+    const higherTokenId = yesIsHigher
+      ? yesTokenPrice.tokenId
+      : noTokenPrice.tokenId;
+    const lowerTokenId = yesIsHigher
+      ? noTokenPrice.tokenId
+      : yesTokenPrice.tokenId;
 
     // Initialize higher leg tracking
     if (this.higherLeg === null && higherPrice >= 0.52) {
@@ -85,7 +95,12 @@ export class LadderScaleStrategy extends TradingStrategy {
     const lowerSize = lowerPosition?.size || 0;
 
     // Sync entries with actual positions (only track successful orders)
-    this.syncEntriesWithPositions(higherSize, lowerSize, higherPosition, lowerPosition);
+    this.syncEntriesWithPositions(
+      higherSize,
+      lowerSize,
+      higherPosition,
+      lowerPosition
+    );
 
     // Weighted averages from entries
     const avgHigher = this.calculateWeightedAverage(this.higherEntries);
@@ -98,7 +113,8 @@ export class LadderScaleStrategy extends TradingStrategy {
     // Metrics
     const pairCost = effectiveAvgHigher + effectiveAvgLower;
     const totalSize = higherSize + lowerSize;
-    const asymRatio = totalSize > 0 ? Math.max(higherSize, lowerSize) / totalSize : 0;
+    const asymRatio =
+      totalSize > 0 ? Math.max(higherSize, lowerSize) / totalSize : 0;
     const balanceRatio =
       totalSize > 0 && Math.max(higherSize, lowerSize) > 0
         ? Math.min(higherSize, lowerSize) / Math.max(higherSize, lowerSize)
@@ -241,15 +257,16 @@ export class LadderScaleStrategy extends TradingStrategy {
     }
 
     const probeSize = Math.floor((probeSizeMin + probeSizeMax) / 2); // ~20 shares
-    
+
     // Ladder offsets: -0.01, -0.03
     const priceOffsets = [-0.01, -0.03];
-    const offset = priceOffsets[currentEntryCount] ?? priceOffsets[priceOffsets.length - 1];
+    const offset =
+      priceOffsets[currentEntryCount] ?? priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, higherPrice + offset);
 
     // Only place first order at current price, subsequent at ladder prices
     const actualPrice = currentEntryCount === 0 ? higherPrice : limitPrice;
-    
+
     // Calculate projected average after all ladder orders (2 orders total)
     // For first order: simulate both orders
     // For second order: use actual first order from entries
@@ -259,18 +276,26 @@ export class LadderScaleStrategy extends TradingStrategy {
       const totalPlannedSize = probeSize * 2;
       const firstOrderPrice = higherPrice;
       const secondOrderPrice = Math.max(0.01, higherPrice + priceOffsets[1]);
-      const projectedTotalCost = firstOrderPrice * probeSize + secondOrderPrice * probeSize;
-      projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+      const projectedTotalCost =
+        firstOrderPrice * probeSize + secondOrderPrice * probeSize;
+      projectedAvg =
+        totalPlannedSize > 0
+          ? projectedTotalCost / totalPlannedSize
+          : higherPrice;
     } else {
       // Second order: use actual first order from entries
       const firstEntry = this.higherEntries[0];
       const firstOrderPrice = firstEntry.price;
       const secondOrderPrice = limitPrice;
       const totalPlannedSize = firstEntry.size + probeSize;
-      const projectedTotalCost = firstOrderPrice * firstEntry.size + secondOrderPrice * probeSize;
-      projectedAvg = totalPlannedSize > 0 ? projectedTotalCost / totalPlannedSize : higherPrice;
+      const projectedTotalCost =
+        firstOrderPrice * firstEntry.size + secondOrderPrice * probeSize;
+      projectedAvg =
+        totalPlannedSize > 0
+          ? projectedTotalCost / totalPlannedSize
+          : higherPrice;
     }
-    
+
     if (projectedAvg >= maxProjectedAvg) {
       return null;
     }
@@ -281,7 +306,9 @@ export class LadderScaleStrategy extends TradingStrategy {
       tokenId: higherTokenId,
       price: actualPrice,
       size: probeSize,
-      reason: `LadderScale Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${currentEntryCount + 1}/2), probe ${probeSize} shares`,
+      reason: `LadderScale Entry: higher @ ${actualPrice.toFixed(4)} (ladder ${
+        currentEntryCount + 1
+      }/2), probe ${probeSize} shares`,
     };
   }
 
@@ -330,7 +357,10 @@ export class LadderScaleStrategy extends TradingStrategy {
             tokenId: higherTokenId,
             price: higherPrice,
             size: addSize,
-            reason: `LadderScale Avg-Down: higher dip ${((avgHigher - higherPrice) * 100).toFixed(2)}¢, add ${addSize} @ ${higherPrice.toFixed(4)}`,
+            reason: `LadderScale Avg-Down: higher dip ${(
+              (avgHigher - higherPrice) *
+              100
+            ).toFixed(2)}¢, add ${addSize} @ ${higherPrice.toFixed(4)}`,
           };
         }
       }
@@ -364,7 +394,8 @@ export class LadderScaleStrategy extends TradingStrategy {
       // Ladder offsets: -0.02, -0.05
       const priceOffsets = [-0.02, -0.05];
       const hedgeOrdersCount = this.lowerEntries.length;
-      const offset = priceOffsets[hedgeOrdersCount] ?? priceOffsets[priceOffsets.length - 1];
+      const offset =
+        priceOffsets[hedgeOrdersCount] ?? priceOffsets[priceOffsets.length - 1];
       const limitPrice = Math.max(0.01, lowerPrice + offset);
 
       // Only place first order at current price, subsequent at ladder prices
@@ -385,16 +416,18 @@ export class LadderScaleStrategy extends TradingStrategy {
         true // apply extra hedge constraints
       );
 
-        if (decision) {
-          // Don't add to entries here - only add when order succeeds (in syncEntriesWithPositions)
-          return {
-            action: yesIsHigher ? "BUY_NO" : "BUY_YES",
-            tokenId: lowerTokenId,
-            price: actualPrice,
-            size: addSize,
-            reason: `LadderScale Hedge: lower @ ${actualPrice.toFixed(4)}, add ${addSize}`,
-          };
-        }
+      if (decision) {
+        // Don't add to entries here - only add when order succeeds (in syncEntriesWithPositions)
+        return {
+          action: yesIsHigher ? "BUY_NO" : "BUY_YES",
+          tokenId: lowerTokenId,
+          price: actualPrice,
+          size: addSize,
+          reason: `LadderScale Hedge: lower @ ${actualPrice.toFixed(
+            4
+          )}, add ${addSize}`,
+        };
+      }
     }
 
     return null;
@@ -425,7 +458,9 @@ export class LadderScaleStrategy extends TradingStrategy {
         tokenId: "",
         price: 0,
         size: 0,
-        reason: `LadderScale Lock: pair_cost=${pairCost.toFixed(4)} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
+        reason: `LadderScale Lock: pair_cost=${pairCost.toFixed(
+          4
+        )} ≤ ${targetPairCost}, balance=${balanceRatio.toFixed(
           2
         )}, asym=${asymRatio.toFixed(2)}`,
       };
@@ -483,31 +518,45 @@ export class LadderScaleStrategy extends TradingStrategy {
       return null;
     }
 
-    const buyRatio = Math.min(buyRatioMax, buyRatioMin + this.reversalOrdersPlaced * 0.05);
+    const buyRatio = Math.min(
+      buyRatioMax,
+      buyRatioMin + this.reversalOrdersPlaced * 0.05
+    );
     const targetBuySize = Math.floor(lowerSize * buyRatio);
 
-    const roundedSize = Math.max(10, Math.min(50, Math.round(targetBuySize / 10) * 10));
+    const roundedSize = Math.max(
+      10,
+      Math.min(50, Math.round(targetBuySize / 10) * 10)
+    );
     if (roundedSize <= 0) {
       return null;
     }
 
     // Ladder offsets: -0.02, -0.03, -0.05
     const priceOffsets = [-0.02, -0.03, -0.05];
-    const offset = priceOffsets[this.reversalOrdersPlaced] ?? priceOffsets[priceOffsets.length - 1];
+    const offset =
+      priceOffsets[this.reversalOrdersPlaced] ??
+      priceOffsets[priceOffsets.length - 1];
     const limitPrice = Math.max(0.01, lowerPrice + offset);
 
     // Simulate new lower average
     const newLowerSize = lowerSize + roundedSize;
-    const newLowerCost = effectiveAvgLower * lowerSize + limitPrice * roundedSize;
-    const newLowerAvg = newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
+    const newLowerCost =
+      effectiveAvgLower * lowerSize + limitPrice * roundedSize;
+    const newLowerAvg =
+      newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
     const newPairCost = effectiveAvgHigher + newLowerAvg;
 
     const newTotalSize = higherSize + newLowerSize;
-    const newAsymRatio = newTotalSize > 0 ? Math.max(higherSize, newLowerSize) / newTotalSize : 0;
+    const newAsymRatio =
+      newTotalSize > 0 ? Math.max(higherSize, newLowerSize) / newTotalSize : 0;
     const newMinQty = Math.min(higherSize, newLowerSize);
 
     // Calculate total USD cost
-    const totalCost = effectiveAvgHigher * higherSize + effectiveAvgLower * lowerSize + limitPrice * roundedSize;
+    const totalCost =
+      effectiveAvgHigher * higherSize +
+      effectiveAvgLower * lowerSize +
+      limitPrice * roundedSize;
     // Convert total cost to equivalent pair shares: total_cost / pair_cost
     const equivalentPairShares = newPairCost > 0 ? totalCost / newPairCost : 0;
 
@@ -532,16 +581,21 @@ export class LadderScaleStrategy extends TradingStrategy {
       tokenId: lowerTokenId,
       price: limitPrice,
       size: roundedSize,
-      reason: `LadderScale Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(higherPrice + priceDiffThreshold).toFixed(
-        4
-      )}, buy ${roundedSize} @ ${limitPrice.toFixed(4)} (order ${this.reversalOrdersPlaced}/3)`,
+      reason: `LadderScale Reversal: lower ${lowerPrice.toFixed(4)} ≥ ${(
+        higherPrice + priceDiffThreshold
+      ).toFixed(4)}, buy ${roundedSize} @ ${limitPrice.toFixed(4)} (order ${
+        this.reversalOrdersPlaced
+      }/3)`,
     };
   }
 
-  private computeHigherAddSize(currentPrice: number, avgHigher: number): number {
+  private computeHigherAddSize(
+    currentPrice: number,
+    avgHigher: number
+  ): number {
     // 50–150 shares, larger when dip is larger
-    const baseMin = 50;
-    const baseMax = 150;
+    const baseMin = 10;
+    const baseMax = 30;
     const dipAmount = avgHigher - currentPrice;
     if (dipAmount <= 0) return 0;
 
@@ -552,8 +606,8 @@ export class LadderScaleStrategy extends TradingStrategy {
 
   private computeLowerAddSize(higherSize: number, lowerSize: number): number {
     // 80–150 shares, targeting ~70% of higher qty
-    const baseMin = 80;
-    const baseMax = 150;
+    const baseMin = 20;
+    const baseMax = 30;
     const targetLowerSize = Math.floor(higherSize * 0.7);
     const needed = targetLowerSize - lowerSize;
     if (needed <= 0) return 0;
@@ -590,32 +644,44 @@ export class LadderScaleStrategy extends TradingStrategy {
 
     if (side === "HIGHER") {
       newHigherSize = higherSize + addSize;
-      const newHigherCost = effectiveAvgHigher * higherSize + addPrice * addSize;
-      newHigherAvg = newHigherSize > 0 ? newHigherCost / newHigherSize : effectiveAvgHigher;
+      const newHigherCost =
+        effectiveAvgHigher * higherSize + addPrice * addSize;
+      newHigherAvg =
+        newHigherSize > 0 ? newHigherCost / newHigherSize : effectiveAvgHigher;
     } else {
       newLowerSize = lowerSize + addSize;
       const newLowerCost = effectiveAvgLower * lowerSize + addPrice * addSize;
-      newLowerAvg = newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
+      newLowerAvg =
+        newLowerSize > 0 ? newLowerCost / newLowerSize : effectiveAvgLower;
     }
 
     const newPairCost = newHigherAvg + newLowerAvg;
     const newTotalSize = newHigherSize + newLowerSize;
     const newAsymRatio =
-      newTotalSize > 0 ? Math.max(newHigherSize, newLowerSize) / newTotalSize : 0;
+      newTotalSize > 0
+        ? Math.max(newHigherSize, newLowerSize) / newTotalSize
+        : 0;
     const newBalanceRatio =
       newTotalSize > 0 && Math.max(newHigherSize, newLowerSize) > 0
-        ? Math.min(newHigherSize, newLowerSize) / Math.max(newHigherSize, newLowerSize)
+        ? Math.min(newHigherSize, newLowerSize) /
+          Math.max(newHigherSize, newLowerSize)
         : 0;
 
     // Require improving or first-time pair cost, OR if new pair cost is already good (≤targetPairCost)
     // This allows hedges when pair cost is already acceptable even if it doesn't improve
-    if (currentPairCost > 0 && newPairCost >= currentPairCost && newPairCost > targetPairCost) {
+    if (
+      currentPairCost > 0 &&
+      newPairCost >= currentPairCost &&
+      newPairCost > targetPairCost
+    ) {
       return false;
     }
 
     // Balance ratio check: allow first hedge (when lowerSize === 0) with relaxed threshold
     // For first hedge, balance will be 0, so we need to allow it
-    const isFirstHedge = (side === "LOWER" && lowerSize === 0) || (side === "HIGHER" && higherSize === 0);
+    const isFirstHedge =
+      (side === "LOWER" && lowerSize === 0) ||
+      (side === "HIGHER" && higherSize === 0);
     if (!isFirstHedge && newBalanceRatio < minBalanceRatio) {
       return false;
     }
@@ -631,11 +697,15 @@ export class LadderScaleStrategy extends TradingStrategy {
 
       const newMinQty = Math.min(newHigherSize, newLowerSize);
       // Calculate total USD cost
-      const totalCost = effectiveAvgHigher * higherSize + effectiveAvgLower * lowerSize + addPrice * addSize;
+      const totalCost =
+        effectiveAvgHigher * higherSize +
+        effectiveAvgLower * lowerSize +
+        addPrice * addSize;
       // Convert total cost to equivalent pair shares: total_cost / pair_cost
       // This represents how many pairs we could theoretically buy with that money
-      const equivalentPairShares = newPairCost > 0 ? totalCost / newPairCost : 0;
-      
+      const equivalentPairShares =
+        newPairCost > 0 ? totalCost / newPairCost : 0;
+
       // Ensure minimum side has at least 1.02x the equivalent pair shares
       if (newMinQty <= equivalentPairShares * 1.02) {
         return false;
@@ -645,7 +715,9 @@ export class LadderScaleStrategy extends TradingStrategy {
     return true;
   }
 
-  private calculateWeightedAverage(entries: Array<{ price: number; size: number }>): number {
+  private calculateWeightedAverage(
+    entries: Array<{ price: number; size: number }>
+  ): number {
     if (entries.length === 0) return 0;
     const totalCost = entries.reduce((sum, e) => sum + e.price * e.size, 0);
     const totalSize = entries.reduce((sum, e) => sum + e.size, 0);
@@ -664,21 +736,30 @@ export class LadderScaleStrategy extends TradingStrategy {
     lowerPosition: Position | undefined
   ): void {
     // Calculate total size from entries
-    const higherEntriesSize = this.higherEntries.reduce((sum, e) => sum + e.size, 0);
-    const lowerEntriesSize = this.lowerEntries.reduce((sum, e) => sum + e.size, 0);
+    const higherEntriesSize = this.higherEntries.reduce(
+      (sum, e) => sum + e.size,
+      0
+    );
+    const lowerEntriesSize = this.lowerEntries.reduce(
+      (sum, e) => sum + e.size,
+      0
+    );
 
     // If position grew, add new entry (successful order)
     if (higherSize > higherEntriesSize) {
       const newSize = higherSize - higherEntriesSize;
       // Estimate price: use average of existing entries, or default estimate
-      const estimatedPrice = this.higherEntries.length > 0
-        ? this.calculateWeightedAverage(this.higherEntries)
-        : 0.55;
+      const estimatedPrice =
+        this.higherEntries.length > 0
+          ? this.calculateWeightedAverage(this.higherEntries)
+          : 0.55;
       this.higherEntries.push({ price: estimatedPrice, size: newSize });
     } else if (higherSize < higherEntriesSize) {
       // Position decreased (sold/redeemed) - rebuild entries to match
       if (higherSize > 0) {
-        const estimatedPrice = this.calculateWeightedAverage(this.higherEntries);
+        const estimatedPrice = this.calculateWeightedAverage(
+          this.higherEntries
+        );
         this.higherEntries = [{ price: estimatedPrice, size: higherSize }];
       } else {
         this.higherEntries = [];
@@ -688,9 +769,10 @@ export class LadderScaleStrategy extends TradingStrategy {
     // Same for lower leg
     if (lowerSize > lowerEntriesSize) {
       const newSize = lowerSize - lowerEntriesSize;
-      const estimatedPrice = this.lowerEntries.length > 0
-        ? this.calculateWeightedAverage(this.lowerEntries)
-        : 0.50;
+      const estimatedPrice =
+        this.lowerEntries.length > 0
+          ? this.calculateWeightedAverage(this.lowerEntries)
+          : 0.5;
       this.lowerEntries.push({ price: estimatedPrice, size: newSize });
     } else if (lowerSize < lowerEntriesSize) {
       if (lowerSize > 0) {
@@ -702,4 +784,3 @@ export class LadderScaleStrategy extends TradingStrategy {
     }
   }
 }
-
